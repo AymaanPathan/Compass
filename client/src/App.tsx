@@ -2,14 +2,26 @@ import { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "./store/store";
 import { fetchCurrentUser, logoutUser } from "./store/authSlice";
+import { fetchGithubProfile } from "./store/githubSlice";
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
   const { user, status } = useSelector((state: RootState) => state.auth);
+  const {
+    stack,
+    repos,
+    status: githubStatus,
+  } = useSelector((state: RootState) => state.github);
 
   useEffect(() => {
     dispatch(fetchCurrentUser());
   }, [dispatch]);
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      dispatch(fetchGithubProfile());
+    }
+  }, [status, dispatch]);
 
   const handleLogin = () => {
     window.location.href = `${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/auth/github`;
@@ -28,8 +40,8 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-white">
-      <div className="w-full max-w-sm rounded-2xl border border-neutral-800 bg-neutral-900 p-8 text-center">
+    <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-white p-4">
+      <div className="w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-900 p-8 text-center">
         {user ? (
           <>
             <img
@@ -39,6 +51,47 @@ function App() {
             />
             <h1 className="mt-4 text-lg font-semibold">{user.displayName}</h1>
             <p className="text-sm text-neutral-400">@{user.username}</p>
+
+            {githubStatus === "loading" && (
+              <p className="mt-4 text-xs text-neutral-500">
+                Analyzing your GitHub stack...
+              </p>
+            )}
+
+            {stack && (
+              <div className="mt-6 text-left">
+                <p className="text-xs uppercase tracking-wide text-neutral-500 mb-2">
+                  Top languages
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {stack.topLanguages.map((l) => (
+                    <span
+                      key={l.language}
+                      className="rounded-full bg-neutral-800 px-3 py-1 text-xs text-neutral-300"
+                    >
+                      {l.language} · {l.repoCount}
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <p className="text-lg font-semibold">{stack.totalRepos}</p>
+                    <p className="text-xs text-neutral-500">Repos</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-semibold">
+                      {stack.originalRepos}
+                    </p>
+                    <p className="text-xs text-neutral-500">Original</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-semibold">{stack.totalStars}</p>
+                    <p className="text-xs text-neutral-500">Stars</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <button
               onClick={handleLogout}
               className="mt-6 w-full rounded-lg bg-neutral-800 py-2 text-sm font-medium hover:bg-neutral-700 transition-colors"
