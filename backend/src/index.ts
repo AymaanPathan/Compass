@@ -1,13 +1,26 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import OpenAI from "openai";
+import { connectDB } from "./config/db";
+import authRoutes from "./routes/auth";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+connectDB();
+
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL,
+    credentials: true,
+  }),
+);
 app.use(express.json());
+app.use(cookieParser());
+
+app.use("/api/auth", authRoutes);
 
 const openai = new OpenAI({
   apiKey: process.env.TFY_API_KEY,
@@ -29,35 +42,24 @@ app.get("/health", (req: Request, res: Response) => {
 app.post("/api/test-agent", async (req: Request, res: Response) => {
   try {
     const { message } = req.body;
-
     const response = await openai.chat.completions.create({
       model: "groq/openai-gpt-oss-20b",
-
       messages: [
-        {
-          role: "system",
-          content: "You are a helpful AI assistant.",
-        },
+        { role: "system", content: "You are a helpful AI assistant." },
         {
           role: "user",
           content: message || "Say exactly: TrueFoundry connected successfully",
         },
       ],
-
       max_tokens: 500,
     });
-
     return res.json({
       success: true,
       response: response.choices[0]?.message?.content,
     });
   } catch (error: any) {
     console.error("TrueFoundry error:", error);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
