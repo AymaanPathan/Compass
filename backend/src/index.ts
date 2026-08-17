@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import { connectDB } from "./config/db";
 import authRoutes from "./routes/auth";
 import githubRoutes from "./routes/github";
+import mcpRoutes from "./routes/mcp";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -23,6 +24,8 @@ app.use(cookieParser());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/github", githubRoutes);
+app.use("/api/mcp", mcpRoutes);
+
 
 const openai = new OpenAI({
   apiKey: process.env.TFY_API_KEY,
