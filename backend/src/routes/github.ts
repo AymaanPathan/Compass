@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import axios from "axios";
 import User from "../models/User";
 import { requireAuth, AuthRequest } from "../middleware/auth";
+import { githubClient } from "../utils/githubClient";
 
 const router = Router();
 
@@ -12,17 +13,12 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, error: "User not found" });
     }
 
-    const headers = { Authorization: `Bearer ${user.accessToken}` };
+    const gh = githubClient(user.accessToken);
 
-    // core profile
-    const profileRes = await axios.get("https://api.github.com/user", {
-      headers,
-    });
+    const profileRes = await gh.get("/user");
 
-    // repos (owned, most recently pushed first)
-    const reposRes = await axios.get(
-      "https://api.github.com/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator",
-      { headers },
+    const reposRes = await gh.get(
+      "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator",
     );
 
     const repos = reposRes.data;
@@ -91,12 +87,10 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
 
     // access token expired/revoked
     if (error.response?.status === 401) {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          error: "GitHub token invalid, please log in again",
-        });
+      return res.status(401).json({
+        success: false,
+        error: "GitHub token invalid, please log in again",
+      });
     }
 
     res

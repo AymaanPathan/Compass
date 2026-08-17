@@ -9,7 +9,6 @@ function App() {
   const { user, status } = useSelector((state: RootState) => state.auth);
   const {
     stack,
-    repos,
     status: githubStatus,
   } = useSelector((state: RootState) => state.github);
 

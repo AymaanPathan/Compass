@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import User from "../models/User";
 import { requireAuth, AuthRequest } from "../middleware/auth";
+import { githubClient } from "../utils/githubClient";
 
 const router = Router();
 
@@ -59,16 +60,13 @@ router.get("/github/callback", async (req: Request, res: Response) => {
       );
     }
 
-    // fetch GitHub profile
-    const profileRes = await axios.get("https://api.github.com/user", {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const gh = githubClient(accessToken);
+
+    const profileRes = await gh.get("/user");
 
     let email: string | undefined;
     try {
-      const emailsRes = await axios.get("https://api.github.com/user/emails", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+      const emailsRes = await gh.get("/user/emails");
       const primary =
         emailsRes.data.find((e: any) => e.primary) || emailsRes.data[0];
       email = primary?.email;
@@ -88,7 +86,7 @@ router.get("/github/callback", async (req: Request, res: Response) => {
         email,
         accessToken,
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     );
 
     const jwtToken = jwt.sign(
