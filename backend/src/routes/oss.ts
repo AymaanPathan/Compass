@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { agentClient, OSS_AGENT_NAME } from "../services/agentClient";
+
 const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
 
@@ -12,6 +13,21 @@ interface Repo {
   fullName: string;
   description: string | null;
   language: string | null;
+}
+
+export interface RepoRecommendation {
+  rank: number;
+  name: string;
+  url: string;
+  description: string;
+  whyItMatches: string;
+  matchingTechnologies: string[];
+  matchScore: number;
+}
+
+interface BestMatch {
+  name: string;
+  reason: string;
 }
 
 function buildStackPrompt(
@@ -43,12 +59,9 @@ Total repos: ${stack?.totalRepos ?? "unknown"}, Original: ${stack?.originalRepos
 Recent repositories:
 ${sampleRepos || "N/A"}
 
-Find one suitable open-source repository and one real open issue that matches this developer's skills.`;
+Find 5 suitable open-source repositories that match this developer's skills, ranked by contribution potential.`;
 }
 
-// Pulls plain text out of a streamed agent event.
-// NOTE: the SDK docs don't publish the exact event schema — log the raw
-// `data.event` once in dev and adjust the field names below to match.
 function extractText(event: any): string | null {
   if (!event) return null;
   if (
@@ -61,7 +74,57 @@ function extractText(event: any): string | null {
   return null;
 }
 
-// Non-streaming — simplest to consume from Redux
+// Parses the agent's fixed markdown format into structured repo objects.
+// Expected per-repo block:
+//   ## #1 — repo-name
+//   **URL:** https://...
+//   **Description:**
+//   ...
+//   **Why it matches:**
+//   ...
+//   **Matching technologies:**
+//   ...
+//   **Match Score:** 5/5
+function parseRecommendations(text: string): {
+  repositories: RepoRecommendation[];
+  bestMatch: BestMatch | null;
+} {
+  const repositories: RepoRecommendation[] = [];
+
+  const repoRegex =
+    /##\s*#(\d+)\s*[—-]\s*(.+?)\s*\n+\*\*URL:\*\*\s*(\S+)\s*\n+\*\*Description:\*\*\s*\n?(.+?)\s*\n+\*\*Why it matches:\*\*\s*\n?(.+?)\s*\n+\*\*Matching technologies:\*\*\s*\n?(.+?)\s*\n+\*\*Match Score:\*\*\s*(\d+(?:\.\d+)?)\s*\/\s*5/gs;
+
+  let match: RegExpExecArray | null;
+  while ((match = repoRegex.exec(text)) !== null) {
+    const [, rank, name, url, description, whyItMatches, techs, score] = match;
+    repositories.push({
+      rank: Number(rank),
+      name: name.trim(),
+      url: url.trim(),
+      description: description.trim(),
+      whyItMatches: whyItMatches.trim(),
+      matchingTechnologies: techs
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+      matchScore: Number(score),
+    });
+  }
+
+  let bestMatch: BestMatch | null = null;
+  const bestMatchRegex =
+    /##\s*Best Match\s*\n+\*\*Repository:\*\*\s*(.+?)\s*\n+([\s\S]+?)$/;
+  const bestMatchResult = bestMatchRegex.exec(text);
+  if (bestMatchResult) {
+    bestMatch = {
+      name: bestMatchResult[1].trim(),
+      reason: bestMatchResult[2].trim(),
+    };
+  }
+
+  return { repositories, bestMatch };
+}
+
 router.post("/discover", async (req: Request, res: Response) => {
   try {
     const { stack, repos } = req.body;
@@ -90,69 +153,39 @@ router.post("/discover", async (req: Request, res: Response) => {
           JSON.stringify(data.event),
         );
       }
-      // Uncomment while debugging to see the real event shape:
-      // console.log(JSON.stringify(data.event, null, 2));
+    }
+
+    finalText = finalText.trim();
+    const { repositories, bestMatch } = parseRecommendations(finalText);
+
+    if (repositories.length === 0) {
+      // Parsing failed — the agent didn't follow the format exactly.
+      // Fall back to raw text so the frontend can still show *something*
+      // instead of a blank screen, and flag it so we can debug the format.
+      console.warn(
+        "OSS discover: parsed 0 repositories from agent output, returning raw fallback",
+      );
+      return res.json({
+        success: true,
+        repositories: [],
+        bestMatch: null,
+        raw: finalText,
+        parseFailed: true,
+        status: turn?.state?.status,
+      });
     }
 
     return res.json({
       success: true,
-      recommendation: finalText.trim(),
+      repositories,
+      bestMatch,
+      raw: finalText,
+      parseFailed: false,
       status: turn?.state?.status,
     });
   } catch (error: any) {
     console.error("OSS discover error:", error);
     return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Streaming (SSE) — use if you want live token-by-token output
-router.post("/discover/stream", async (req: Request, res: Response) => {
-  try {
-    const { stack, repos } = req.body;
-    if (!stack) {
-      return res.status(400).json({ error: "stack is required" });
-    }
-
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    (res as any).flushHeaders?.();
-
-    const session = await agentClient.createSession({
-      agentName: OSS_AGENT_NAME,
-    });
-    const turn = session.prepareTurn({
-      input: [
-        { type: "user.message", content: buildStackPrompt(stack, repos) },
-      ],
-    });
-
-    for await (const data of turn.execute({ stream: true })) {
-      const chunk = extractText(data.event);
-      if (chunk) {
-        res.write(
-          `data: ${JSON.stringify({ type: "text", content: chunk })}\n\n`,
-        );
-      }
-      if (DEBUG_AGENT_EVENTS) {
-        console.log(
-          `[agent event] ${data.event?.type}`,
-          JSON.stringify(data.event),
-        );
-      }
-    }
-    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
-    res.end();
-  } catch (error: any) {
-    console.error("OSS discover stream error:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    } else {
-      res.write(
-        `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`,
-      );
-      res.end();
-    }
   }
 });
 
