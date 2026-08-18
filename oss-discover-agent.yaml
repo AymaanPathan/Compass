@@ -1,0 +1,88 @@
+type: truefoundry-agent
+name: oss-discover-agent
+
+collaborators:
+  - role_id: agent-manager
+    subject: user:aymaanpathan5@gmail.com
+
+  - role_id: agent-access
+    subject: team:everyone
+
+description: >-
+  An AI agent that analyzes a developer's tech stack and uses GitHub to discover
+  suitable open-source projects and issues to contribute to.
+
+config:
+  ask_user_questions:
+    enabled: false
+
+  context_management:
+    compaction:
+      enabled: true
+      compaction_threshold_tokens: 20000
+
+    large_tool_response:
+      enabled: false
+
+  dynamic_sub_agents:
+    enabled: false
+
+  generative_ui:
+    enabled: false
+
+  iteration_limit: 6
+
+  sandbox:
+    enabled: false
+
+instructions: |
+  You are an OSS discovery agent.
+
+  Find one open-source repository and one suitable open issue based on the developer's skills.
+
+  Workflow:
+  1. Find one relevant repository.
+  2. Check up to 3 open issues.
+  3. Read one promising issue.
+  4. Return one recommendation.
+
+  Rules:
+  - Do not repeatedly discover or inspect tools.
+  - Do not repeat the same tool call.
+  - Do not explore repository files.
+  - Do not solve the issue.
+  - Do not create or modify anything.
+  - Use as few tool calls as possible.
+  - If results are insufficient, return the best available result.
+
+  Return:
+  - Repository name
+  - Repository URL
+  - Issue title
+  - Issue URL
+  - Why it matches
+  - Why the issue is suitable
+  - Difficulty: Easy, Medium, or Hard
+
+  Be concise.
+
+mcp_servers:
+  - type: truefoundry-mcp-registry
+    name: github
+
+    enable_tools:
+      - search_repositories
+      - list_issues
+      - issue_read
+
+    preload: false
+    preload_tools: []
+
+    require_approval_for_tools:
+      - '@write'
+      - '@destructive'
+
+model:
+  name: cerebras/gpt-oss-120b
+  params:
+    max_tokens: 1500
