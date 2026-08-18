@@ -6,6 +6,9 @@ import { fetchGithubProfile } from "./store/githubSlice";
 import { findOssProjects, selectRepository } from "./store/ossSlice";
 import type { RepoRecommendation } from "./store/ossSlice";
 import RepoCard from "./components/RepoCard";
+import { fetchIssuesForRepo, resetIssues } from "./store/issuesSlice";
+import KanbanBoard from "./components/KanbanBoard";
+
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
@@ -26,6 +29,17 @@ function App() {
   useEffect(() => {
     dispatch(fetchCurrentUser());
   }, [dispatch]);
+
+
+  useEffect(() => {
+    if (selectedRepo) {
+      // selectedRepo.url is like "https://github.com/owner/repo"
+      const repoFullName = selectedRepo.url.replace("https://github.com/", "");
+      dispatch(fetchIssuesForRepo(repoFullName));
+    } else {
+      dispatch(resetIssues());
+    }
+  }, [selectedRepo, dispatch]);
 
   useEffect(() => {
     if (status === "authenticated") {
@@ -159,6 +173,12 @@ function App() {
                     <span className="font-medium text-white">
                       {selectedRepo.name}
                     </span>
+                  </div>
+                )}
+
+                {selectedRepo && (
+                  <div className="w-full max-w-6xl mt-6">
+                    <KanbanBoard />
                   </div>
                 )}
               </div>
