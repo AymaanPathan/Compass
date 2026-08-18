@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { agentClient, OSS_AGENT_NAME } from "../services/agentClient";
-
+const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
 
 interface LanguageStat {
@@ -51,11 +51,12 @@ Find one suitable open-source repository and one real open issue that matches th
 // `data.event` once in dev and adjust the field names below to match.
 function extractText(event: any): string | null {
   if (!event) return null;
-  if (typeof event.content === "string") return event.content;
-  if (typeof event.delta?.content === "string") return event.delta.content;
-  if (typeof event.text === "string") return event.text;
-  if (Array.isArray(event.content)) {
-    return event.content.map((c: any) => c.text || "").join("");
+  if (
+    (event.type === "model.message.delta" || event.type === "model.message") &&
+    typeof event.content === "string" &&
+    event.content.length > 0
+  ) {
+    return event.content;
   }
   return null;
 }
@@ -83,6 +84,12 @@ router.post("/discover", async (req: Request, res: Response) => {
     for await (const data of turn.execute({ stream: true })) {
       const chunk = extractText(data.event);
       if (chunk) finalText += chunk;
+      if (DEBUG_AGENT_EVENTS) {
+        console.log(
+          `[agent event] ${data.event?.type}`,
+          JSON.stringify(data.event),
+        );
+      }
       // Uncomment while debugging to see the real event shape:
       // console.log(JSON.stringify(data.event, null, 2));
     }
@@ -121,7 +128,18 @@ router.post("/discover/stream", async (req: Request, res: Response) => {
     });
 
     for await (const data of turn.execute({ stream: true })) {
-      res.write(`data: ${JSON.stringify(data.event)}\n\n`);
+      const chunk = extractText(data.event);
+      if (chunk) {
+        res.write(
+          `data: ${JSON.stringify({ type: "text", content: chunk })}\n\n`,
+        );
+      }
+      if (DEBUG_AGENT_EVENTS) {
+        console.log(
+          `[agent event] ${data.event?.type}`,
+          JSON.stringify(data.event),
+        );
+      }
     }
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     res.end();
