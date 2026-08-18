@@ -22,14 +22,9 @@ function RepoCard({ repo, isBestMatch, isSelected, onSelect }: RepoCardProps) {
             <span className="text-xs font-mono text-neutral-500">
               #{repo.rank}
             </span>
-            <a
-              href={repo.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-semibold text-white hover:underline"
-            >
+            <span className="text-sm font-semibold text-white">
               {repo.name}
-            </a>
+            </span>
             {isBestMatch && (
               <span className="rounded-full bg-emerald-900/50 text-emerald-400 text-[10px] px-2 py-0.5 font-medium">
                 Best Match
@@ -41,6 +36,24 @@ function RepoCard({ repo, isBestMatch, isSelected, onSelect }: RepoCardProps) {
           {repo.matchScore}/5
         </span>
       </div>
+
+      <a
+        href={repo.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-1 flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 hover:underline break-all"
+      >
+        <svg
+          className="shrink-0"
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="currentColor"
+        >
+          <path d="M7.775 3.275a.75.75 0 0 0 1.06 1.06l1.25-1.25a2 2 0 1 1 2.83 2.83l-2.5 2.5a2 2 0 0 1-2.83 0 .75.75 0 0 0-1.06 1.06 3.5 3.5 0 0 0 4.95 0l2.5-2.5a3.5 3.5 0 0 0-4.95-4.95l-1.25 1.25Zm-4.69 9.64a2 2 0 0 1 0-2.83l2.5-2.5a2 2 0 0 1 2.83 0 .75.75 0 0 0 1.06-1.06 3.5 3.5 0 0 0-4.95 0l-2.5 2.5a3.5 3.5 0 0 0 4.95 4.95l1.25-1.25a.75.75 0 0 0-1.06-1.06l-1.25 1.25a2 2 0 0 1-2.83 0Z" />
+        </svg>
+        {repo.url.replace("https://github.com/", "")}
+      </a>
 
       <p className="mt-2 text-xs text-neutral-400">{repo.description}</p>
 
