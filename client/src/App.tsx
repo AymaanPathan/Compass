@@ -3,14 +3,19 @@ import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "./store/store";
 import { fetchCurrentUser, logoutUser } from "./store/authSlice";
 import { fetchGithubProfile } from "./store/githubSlice";
+import { findOssProjects } from "./store/ossSlice";
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
   const { user, status } = useSelector((state: RootState) => state.auth);
+  const { stack, status: githubStatus } = useSelector(
+    (state: RootState) => state.github,
+  );
   const {
-    stack,
-    status: githubStatus,
-  } = useSelector((state: RootState) => state.github);
+    recommendation,
+    status: ossStatus,
+    error: ossError,
+  } = useSelector((state: RootState) => state.oss);
 
   useEffect(() => {
     dispatch(fetchCurrentUser());
@@ -26,8 +31,10 @@ function App() {
     window.location.href = `${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/auth/github`;
   };
 
-  const handleLogout = () => {
-    dispatch(logoutUser());
+  const handleLogout = () => dispatch(logoutUser());
+
+  const handleFindOssProjects = () => {
+    dispatch(findOssProjects());
   };
 
   if (status === "loading" || status === "idle") {
@@ -88,6 +95,26 @@ function App() {
                     <p className="text-xs text-neutral-500">Stars</p>
                   </div>
                 </div>
+
+                <button
+                  onClick={handleFindOssProjects}
+                  disabled={ossStatus === "loading"}
+                  className="mt-6 w-full rounded-lg bg-white py-2 text-sm font-medium text-black hover:bg-neutral-200 transition-colors disabled:opacity-50"
+                >
+                  {ossStatus === "loading"
+                    ? "Finding projects..."
+                    : "Find OSS Projects"}
+                </button>
+
+                {ossError && (
+                  <p className="mt-3 text-xs text-red-400">{ossError}</p>
+                )}
+
+                {recommendation && (
+                  <pre className="mt-4 whitespace-pre-wrap text-left text-xs text-neutral-300 bg-neutral-950 border border-neutral-800 rounded-lg p-4 max-h-80 overflow-y-auto">
+                    {recommendation}
+                  </pre>
+                )}
               </div>
             )}
 
