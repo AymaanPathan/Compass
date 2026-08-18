@@ -3,7 +3,9 @@ import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "./store/store";
 import { fetchCurrentUser, logoutUser } from "./store/authSlice";
 import { fetchGithubProfile } from "./store/githubSlice";
-import { findOssProjects } from "./store/ossSlice";
+import { findOssProjects, selectRepository } from "./store/ossSlice";
+import type { RepoRecommendation } from "./store/ossSlice";
+import RepoCard from "./components/RepoCard";
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
@@ -12,7 +14,11 @@ function App() {
     (state: RootState) => state.github,
   );
   const {
-    recommendation,
+    repositories,
+    bestMatch,
+    selectedRepo,
+    parseFailed,
+    raw,
     status: ossStatus,
     error: ossError,
   } = useSelector((state: RootState) => state.oss);
@@ -37,6 +43,10 @@ function App() {
     dispatch(findOssProjects());
   };
 
+  const handleSelectRepo = (repo: RepoRecommendation) => {
+    dispatch(selectRepository(repo));
+  };
+
   if (status === "loading" || status === "idle") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-neutral-950">
@@ -47,7 +57,7 @@ function App() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-white p-4">
-      <div className="w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-900 p-8 text-center">
+      <div className="w-full max-w-2xl rounded-2xl border border-neutral-800 bg-neutral-900 p-8 text-center">
         {user ? (
           <>
             <img
@@ -110,10 +120,46 @@ function App() {
                   <p className="mt-3 text-xs text-red-400">{ossError}</p>
                 )}
 
-                {recommendation && (
-                  <pre className="mt-4 whitespace-pre-wrap text-left text-xs text-neutral-300 bg-neutral-950 border border-neutral-800 rounded-lg p-4 max-h-80 overflow-y-auto">
-                    {recommendation}
-                  </pre>
+                {ossStatus === "loading" && (
+                  <div className="mt-4 flex items-center justify-center gap-2 text-xs text-neutral-500">
+                    <div className="h-3 w-3 rounded-full border-2 border-neutral-700 border-t-white animate-spin" />
+                    Agent is searching GitHub...
+                  </div>
+                )}
+
+                {ossStatus === "succeeded" && parseFailed && (
+                  <div className="mt-4 text-left text-xs text-amber-400 bg-amber-950/30 border border-amber-900 rounded-lg p-3">
+                    Couldn't parse structured recommendations — showing raw
+                    output instead.
+                    <pre className="mt-2 whitespace-pre-wrap text-neutral-300">
+                      {raw}
+                    </pre>
+                  </div>
+                )}
+
+                {ossStatus === "succeeded" &&
+                  !parseFailed &&
+                  repositories.length > 0 && (
+                    <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {repositories.map((repo) => (
+                        <RepoCard
+                          key={repo.url}
+                          repo={repo}
+                          isBestMatch={bestMatch?.name === repo.name}
+                          isSelected={selectedRepo?.url === repo.url}
+                          onSelect={handleSelectRepo}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                {selectedRepo && (
+                  <div className="mt-4 rounded-lg border border-white/20 bg-neutral-800 p-3 text-left text-xs">
+                    <span className="text-neutral-400">Selected: </span>
+                    <span className="font-medium text-white">
+                      {selectedRepo.name}
+                    </span>
+                  </div>
                 )}
               </div>
             )}
