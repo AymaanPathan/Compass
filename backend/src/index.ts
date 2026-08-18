@@ -8,6 +8,8 @@ import authRoutes from "./routes/auth";
 import githubRoutes from "./routes/github";
 import mcpRoutes from "./routes/mcp";
 import ossRoutes from "./routes/oss";
+import issuesRoutes from "./routes/issues";
+
 
 
 const app = express();
@@ -28,6 +30,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/github", githubRoutes);
 app.use("/api/mcp", mcpRoutes);
 app.use("/api/oss", ossRoutes);
+app.use("/api/issues", issuesRoutes);
 
 
 const openai = new OpenAI({

@@ -62,10 +62,6 @@ mcp_servers:
     enable_tools:
       - list_issues
 
-    require_approval_for_tools:
-      - "@write"
-      - "@destructive"
-
 model:
   name: cerebras/gpt-oss-120b
   params:
