@@ -4,7 +4,7 @@ import type { AppDispatch, RootState } from "../store/store";
 import { logoutUser } from "../store/authSlice";
 import { fetchGithubProfile } from "../store/githubSlice";
 import { findOssProjects } from "../store/ossSlice";
-import RepoCard from "../components/RepoCard";
+import RepoKanbanBoard from "../components/RepoKanbanBoard";
 
 function Dashboard() {
   const dispatch = useDispatch<AppDispatch>();
@@ -14,7 +14,6 @@ function Dashboard() {
   );
   const {
     repositories,
-    bestMatch,
     parseFailed,
     raw,
     status: ossStatus,
@@ -167,18 +166,15 @@ function Dashboard() {
           !parseFailed &&
           repositories.length > 0 && (
             <section className="mt-8">
-              <h2 className="text-sm font-medium text-neutral-400 mb-4">
-                Recommended repositories
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {repositories.map((repo) => (
-                  <RepoCard
-                    key={repo.url}
-                    repo={repo}
-                    isBestMatch={bestMatch?.name === repo.name}
-                  />
-                ))}
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-medium text-neutral-400">
+                  Recommended repositories
+                </h2>
+                <p className="text-[11px] text-neutral-600">
+                  Drag cards across columns · drop in Selected to unlock explore
+                </p>
               </div>
+              <RepoKanbanBoard />
             </section>
           )}
       </main>

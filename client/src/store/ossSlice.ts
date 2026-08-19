@@ -18,20 +18,36 @@ export interface BestMatch {
   reason: string;
 }
 
+export type OssColumnId = "suggested" | "shortlisted" | "selected";
+
+export const OSS_COLUMNS: { id: OssColumnId; title: string; hint: string }[] = [
+  { id: "suggested", title: "Suggested", hint: "Agent recommendations" },
+  { id: "shortlisted", title: "Shortlisted", hint: "Worth a closer look" },
+  { id: "selected", title: "Selected", hint: "Your pick" },
+];
+
 interface OssState {
   repositories: RepoRecommendation[];
   bestMatch: BestMatch | null;
   selectedRepo: RepoRecommendation | null;
+  columns: Record<OssColumnId, string[]>; // repo.url[]
   parseFailed: boolean;
   raw: string | null;
   status: "idle" | "loading" | "succeeded" | "failed";
   error: string | null;
 }
 
+const emptyColumns: Record<OssColumnId, string[]> = {
+  suggested: [],
+  shortlisted: [],
+  selected: [],
+};
+
 const initialState: OssState = {
   repositories: [],
   bestMatch: null,
   selectedRepo: null,
+  columns: emptyColumns,
   parseFailed: false,
   raw: null,
   status: "idle",
@@ -72,6 +88,7 @@ const ossSlice = createSlice({
       state.repositories = [];
       state.bestMatch = null;
       state.selectedRepo = null;
+      state.columns = emptyColumns;
       state.parseFailed = false;
       state.raw = null;
       state.status = "idle";
@@ -82,6 +99,21 @@ const ossSlice = createSlice({
     },
     clearSelectedRepository: (state) => {
       state.selectedRepo = null;
+    },
+    moveRepoToColumn: (
+      state,
+      action: { payload: { repoUrl: string; toColumn: OssColumnId } },
+    ) => {
+      const { repoUrl, toColumn } = action.payload;
+      (Object.keys(state.columns) as OssColumnId[]).forEach((col) => {
+        state.columns[col] = state.columns[col].filter((u) => u !== repoUrl);
+      });
+      state.columns[toColumn].push(repoUrl);
+
+      if (toColumn === "selected") {
+        const repo = state.repositories.find((r) => r.url === repoUrl);
+        if (repo) state.selectedRepo = repo;
+      }
     },
   },
   extraReducers: (builder) => {
@@ -97,6 +129,11 @@ const ossSlice = createSlice({
         state.bestMatch = action.payload.bestMatch;
         state.raw = action.payload.raw;
         state.parseFailed = action.payload.parseFailed;
+        state.columns = {
+          suggested: action.payload.repositories.map((r) => r.url),
+          shortlisted: [],
+          selected: [],
+        };
       })
       .addCase(findOssProjects.rejected, (state, action) => {
         state.status = "failed";
@@ -109,5 +146,6 @@ export const {
   resetOssRecommendation,
   selectRepository,
   clearSelectedRepository,
+  moveRepoToColumn,
 } = ossSlice.actions;
 export default ossSlice.reducer;
