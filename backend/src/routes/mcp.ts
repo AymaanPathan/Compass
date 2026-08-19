@@ -191,8 +191,25 @@ router.post("/github/file-contents", async (req: Request, res: Response) => {
     if (ref) args.ref = ref;
 
     const result = await callGithubMcpTool("get_file_contents", args);
+
+    // The MCP server signals failure via result.isError, not via a thrown
+    // exception — a wrong/nonexistent path returns isError: true with the
+    // reason in a text block, not a resource block.
+    if (result?.isError) {
+      const contentBlocks: McpContentBlock[] = Array.isArray(result?.content)
+        ? (result.content as McpContentBlock[])
+        : [];
+
+      const message =
+        contentBlocks
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text)
+          .join("\n") || "File not found in repository.";
+
+      return res.status(404).json({ success: false, error: message, path });
+    }
+
     const file = extractFileContent(result, path);
-    console.log(JSON.stringify(result, null, 2));
     return res.json({ success: true, file });
   } catch (error: any) {
     console.error("get_file_contents error:", error);
