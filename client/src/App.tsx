@@ -3,6 +3,7 @@ import { useDispatch } from "react-redux";
 import { Routes, Route } from "react-router-dom";
 import type { AppDispatch } from "./store/store";
 import { fetchCurrentUser } from "./store/authSlice";
+import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
 import RepoDetailPage from "./pages/RepoDetailPage";
 
@@ -15,7 +16,8 @@ function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<Dashboard />} />
+      <Route path="/" element={<Landing />} />
+      <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/repo/:owner/:repo" element={<RepoDetailPage />} />
     </Routes>
   );
