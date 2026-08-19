@@ -86,9 +86,15 @@ router.get("/github/issue", async (req: Request, res: Response) => {
 // Used by "View Code" on investigation relevantFiles.
 // --------------------------------------------------
 
-interface McpTextBlock {
+interface McpContentBlock {
   type: string;
   text?: string;
+  resource?: {
+    uri?: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string; // base64
+  };
 }
 
 interface ParsedFileContent {
@@ -99,7 +105,42 @@ interface ParsedFileContent {
 }
 
 function extractFileContent(result: any, path: string): ParsedFileContent {
-  const blocks: McpTextBlock[] = result?.content || [];
+  const blocks: McpContentBlock[] = result?.content || [];
+
+  // The real file body comes back as a "resource" block, not a "text" block.
+  // The "text" block is just a status message like
+  // "successfully downloaded text file (SHA: ...)".
+  const resourceBlock = blocks.find((b) => b.type === "resource" && b.resource);
+
+  if (resourceBlock?.resource) {
+    const { text, blob, mimeType } = resourceBlock.resource;
+
+    if (typeof text === "string") {
+      return { content: text, isTruncated: false, isBinary: false, path };
+    }
+
+    if (typeof blob === "string") {
+      const isLikelyBinary =
+        mimeType &&
+        !mimeType.startsWith("text/") &&
+        !mimeType.includes("json") &&
+        !mimeType.includes("javascript") &&
+        !mimeType.includes("xml");
+
+      if (isLikelyBinary) {
+        return { content: "", isTruncated: false, isBinary: true, path };
+      }
+
+      try {
+        const decoded = Buffer.from(blob, "base64").toString("utf-8");
+        return { content: decoded, isTruncated: false, isBinary: false, path };
+      } catch {
+        return { content: "", isTruncated: false, isBinary: true, path };
+      }
+    }
+  }
+
+  // Fallback: no resource block — use whatever text blocks exist.
   const rawText = blocks
     .filter((b) => b.type === "text" && typeof b.text === "string")
     .map((b) => b.text as string)
@@ -109,12 +150,10 @@ function extractFileContent(result: any, path: string): ParsedFileContent {
     return { content: "", isTruncated: false, isBinary: false, path };
   }
 
-  // "too large" message case from GitHub MCP server
   if (rawText.includes("too large to display")) {
     return { content: rawText, isTruncated: true, isBinary: false, path };
   }
 
-  // Some gateways wrap the file in a JSON envelope: { content, encoding, size, ... }
   try {
     const parsed = JSON.parse(rawText);
     if (parsed && typeof parsed === "object" && "content" in parsed) {
@@ -126,8 +165,7 @@ function extractFileContent(result: any, path: string): ParsedFileContent {
       return { content: body, isTruncated: false, isBinary: false, path };
     }
   } catch {
-    // Not JSON — the GitHub MCP server already returns decoded plain text
-    // for text files under 1MB, so this is the normal path.
+    // Not JSON, and no resource block — this is a genuine status/error message.
   }
 
   return { content: rawText, isTruncated: false, isBinary: false, path };
@@ -154,7 +192,7 @@ router.post("/github/file-contents", async (req: Request, res: Response) => {
 
     const result = await callGithubMcpTool("get_file_contents", args);
     const file = extractFileContent(result, path);
-
+    console.log(JSON.stringify(result, null, 2));
     return res.json({ success: true, file });
   } catch (error: any) {
     console.error("get_file_contents error:", error);

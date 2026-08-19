@@ -4,9 +4,8 @@ import { closeFileViewer } from "../store/fileContentSlice";
 
 function CodeViewerModal() {
   const dispatch = useDispatch<AppDispatch>();
-  const { isOpen, path, content, status, error, isTruncated } = useSelector(
-    (state: RootState) => state.fileContent,
-  );
+  const { isOpen, path, content, status, error, isTruncated, isBinary } =
+    useSelector((state: RootState) => state.fileContent);
 
   if (!isOpen) return null;
 
@@ -43,17 +42,30 @@ function CodeViewerModal() {
             <p className="text-xs text-red-400">{error}</p>
           )}
 
-          {status === "succeeded" && isTruncated && (
+          {status === "succeeded" && isBinary && (
+            <p className="text-xs text-neutral-500">
+              Binary file — cannot display content.
+            </p>
+          )}
+
+          {status === "succeeded" && !isBinary && isTruncated && (
             <p className="text-xs text-amber-400 whitespace-pre-wrap">
               {content}
             </p>
           )}
 
-          {status === "succeeded" && !isTruncated && (
-            <pre className="text-xs text-neutral-300 font-mono leading-relaxed whitespace-pre-wrap break-words">
-              {content}
-            </pre>
-          )}
+          {status === "succeeded" &&
+            !isBinary &&
+            !isTruncated &&
+            (content ? (
+              <pre className="text-xs text-neutral-300 font-mono leading-relaxed whitespace-pre-wrap break-words">
+                {content}
+              </pre>
+            ) : (
+              <p className="text-xs text-neutral-500">
+                No content returned for this file.
+              </p>
+            ))}
         </div>
       </div>
     </div>

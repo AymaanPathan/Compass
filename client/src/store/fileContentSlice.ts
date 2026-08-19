@@ -17,6 +17,7 @@ interface FileContentState {
   isOpen: boolean;
   status: "idle" | "loading" | "succeeded" | "failed";
   error: string | null;
+  currentRequestId: string | null;
 }
 
 const initialState: FileContentState = {
@@ -27,6 +28,7 @@ const initialState: FileContentState = {
   isOpen: false,
   status: "idle",
   error: null,
+  currentRequestId: null,
 };
 
 export const fetchFileContent = createAsyncThunk(
@@ -54,11 +56,16 @@ const fileContentSlice = createSlice({
   reducers: {
     closeFileViewer: (state) => {
       state.isOpen = false;
+      // Invalidate any in-flight request so a late response can't
+      // reopen the modal or overwrite state after it's been closed.
+      state.currentRequestId = null;
     },
   },
   extraReducers: (builder) => {
     builder
       .addCase(fetchFileContent.pending, (state, action) => {
+        // This is now the only request whose response we'll accept.
+        state.currentRequestId = action.meta.requestId;
         state.status = "loading";
         state.error = null;
         state.isOpen = true;
@@ -66,6 +73,8 @@ const fileContentSlice = createSlice({
         state.content = null;
       })
       .addCase(fetchFileContent.fulfilled, (state, action) => {
+        // Ignore stale responses from superseded requests.
+        if (action.meta.requestId !== state.currentRequestId) return;
         state.status = "succeeded";
         state.content = action.payload.content;
         state.isTruncated = action.payload.isTruncated;
@@ -73,6 +82,7 @@ const fileContentSlice = createSlice({
         state.path = action.payload.path;
       })
       .addCase(fetchFileContent.rejected, (state, action) => {
+        if (action.meta.requestId !== state.currentRequestId) return;
         state.status = "failed";
         state.error = action.payload as string;
       });
