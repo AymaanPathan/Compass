@@ -1,17 +1,15 @@
 type: truefoundry-agent
 name: oss-issues-agent
 
-description: Fetch open GitHub issues for a selected repository.
-
-source:
-  type: inline
-
 collaborators:
   - role_id: agent-manager
     subject: user:aymaanpathan5@gmail.com
 
   - role_id: agent-access
     subject: team:everyone
+
+description: >-
+  Fetches a small paginated set of open GitHub issues for a selected repository.
 
 config:
   ask_user_questions:
@@ -22,32 +20,60 @@ config:
       enabled: true
       compaction_threshold_tokens: 12000
 
+    large_tool_response:
+      enabled: false
+
   dynamic_sub_agents:
     enabled: false
 
   generative_ui:
     enabled: false
 
-  iteration_limit: 2
+  iteration_limit: 8
 
   sandbox:
     enabled: false
 
 instructions: |
-  Fetch open issues for the provided GitHub repository.
+  Fetch a page of open GitHub issues for the provided repository.
 
-  Extract owner and repo, then call list_issues once.
+  Extract the repository owner and name.
 
-  Return only:
-  - issue number
-  - title
-  - labels
-  - URL
-  - short description
+  Call list_issues exactly once using:
 
-  Do not analyze, rank, or inspect individual issues.
+  - state: OPEN
+  - perPage: 10
+  - fields: number, title, labels
 
-  If no issues exist, say so.
+  PAGINATION
+
+  For the first request, do not provide an after cursor.
+
+  If the input contains an "after" cursor, pass it unchanged to
+  list_issues in the after parameter.
+
+  Never fetch additional pages automatically.
+
+  After list_issues succeeds, immediately return the final answer.
+  Do not call any more tools.
+
+  Return only the fetched issues:
+
+  ## #<issue number> — <title>
+
+  **Labels:** <comma-separated labels or None>
+
+  If no issues are found, say:
+  No open issues found.
+
+  Do not include issue bodies, descriptions, summaries, analysis,
+  ranking, recommendations, or any additional data.
+
+  If pagination information is available in the tool response, include:
+
+  Next cursor: <endCursor>
+
+  After returning the result, stop.
 
 mcp_servers:
   - type: truefoundry-mcp-registry
@@ -61,7 +87,12 @@ mcp_servers:
     preload_tools:
       - list_issues
 
+    require_approval_for_tools:
+      - "@write"
+      - "@destructive"
+
 model:
   name: cerebras/gpt-oss-120b
   params:
     max_tokens: 1500
+    reasoning_effort: low
