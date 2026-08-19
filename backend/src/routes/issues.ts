@@ -1,19 +1,14 @@
 import { Router, Request, Response } from "express";
-import { agentClient, OSS_ISSUE_AGENT_NAME } from "../services/agentClient";
+import { agentClient, OSS_ISSUES_AGENT_NAME } from "../services/agentClient";
 
 const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
 
 export interface GithubIssue {
-  id: number;
   number: number;
   title: string;
-  html_url: string;
-  state: string;
-  labels?: { name: string; color?: string }[];
-  user?: { login: string; avatar_url?: string };
-  created_at?: string;
-  comments?: number;
+  labels: string[];
+  url: string;
 }
 
 function extractText(event: any): string | null {
@@ -28,51 +23,38 @@ function extractText(event: any): string | null {
   return null;
 }
 
-// The agent is instructed to return raw JSON only, but models still
-// occasionally wrap it in ```json fences or add stray whitespace/prose.
-// This strips fences and tries a few reasonable shapes.
-function parseIssuesJSON(text: string): GithubIssue[] {
-  let cleaned = text.trim();
-  cleaned = cleaned.replace(/^```json\s*/i, "").replace(/```\s*$/, "");
-  cleaned = cleaned.replace(/^```\s*/, "");
-
-  let parsed: any;
+function parseIssuesResponse(
+  text: string,
+): { issues: GithubIssue[]; nextCursor: string } | null {
   try {
-    parsed = JSON.parse(cleaned);
+    const cleaned = text.trim().replace(/^```json\s*|\s*```$/g, "");
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed.issues)) return null;
+    return { issues: parsed.issues, nextCursor: parsed.nextCursor || "" };
   } catch {
-    // Last resort: grab the first {...} or [...] block in the text
-    const match = cleaned.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
-    if (!match) throw new Error("Could not locate JSON in agent output");
-    parsed = JSON.parse(match[0]);
+    return null;
   }
-
-  if (Array.isArray(parsed)) return parsed;
-  if (Array.isArray(parsed.issues)) return parsed.issues;
-  if (Array.isArray(parsed.data)) return parsed.data;
-
-  throw new Error("Parsed JSON did not contain an issues array");
 }
 
-router.post("/discover", async (req: Request, res: Response) => {
+router.post("/fetch", async (req: Request, res: Response) => {
   try {
-    const { repoFullName } = req.body as { repoFullName?: string };
-    if (!repoFullName || !repoFullName.includes("/")) {
-      return res.status(400).json({
-        success: false,
-        error: "repoFullName is required in 'owner/repo' format",
-      });
+    const { repoFullName, after } = req.body;
+    if (!repoFullName) {
+      return res
+        .status(400)
+        .json({ success: false, error: "repoFullName is required" });
     }
 
     const session = await agentClient.createSession({
-      agentName: OSS_ISSUE_AGENT_NAME,
+      agentName: OSS_ISSUES_AGENT_NAME,
     });
+
+    const prompt = after
+      ? `Repository: ${repoFullName}\nAfter cursor: ${after}`
+      : `Repository: ${repoFullName}`;
+
     const turn = session.prepareTurn({
-      input: [
-        {
-          type: "user.message",
-          content: `Repository: ${repoFullName}\nFetch the open issues for this repository.`,
-        },
-      ],
+      input: [{ type: "user.message", content: prompt }],
     });
 
     let finalText = "";
@@ -81,22 +63,23 @@ router.post("/discover", async (req: Request, res: Response) => {
       if (chunk) finalText += chunk;
       if (DEBUG_AGENT_EVENTS) {
         console.log(
-          `[issue agent event] ${data.event?.type}`,
+          `[issues agent event] ${data.event?.type}`,
           JSON.stringify(data.event),
         );
       }
     }
 
     finalText = finalText.trim();
+    const parsed = parseIssuesResponse(finalText);
 
-    let issues: GithubIssue[];
-    try {
-      issues = parseIssuesJSON(finalText);
-    } catch (parseErr: any) {
-      console.warn("Issue discover: JSON parse failed", parseErr.message);
+    if (!parsed) {
+      console.warn(
+        "Issues agent: failed to parse JSON, returning raw fallback",
+      );
       return res.json({
         success: true,
         issues: [],
+        nextCursor: "",
         raw: finalText,
         parseFailed: true,
       });
@@ -104,12 +87,13 @@ router.post("/discover", async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      issues,
+      issues: parsed.issues,
+      nextCursor: parsed.nextCursor,
       raw: finalText,
       parseFailed: false,
     });
   } catch (error: any) {
-    console.error("Issue discover error:", error);
+    console.error("Issues fetch error:", error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });

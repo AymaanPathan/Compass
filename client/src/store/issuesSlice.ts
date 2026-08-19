@@ -1,64 +1,77 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import api from "../api/axios";
+import type { RootState } from "./store";
 
 export interface GithubIssue {
-  id: number;
   number: number;
   title: string;
-  html_url: string;
-  state: string;
-  labels?: { name: string; color?: string }[];
-  user?: { login: string; avatar_url?: string };
-  created_at?: string;
-  comments?: number;
+  labels: string[];
+  url: string;
 }
 
-export type KanbanColumnId = "toExplore" | "inProgress" | "inReview" | "done";
-
-export const KANBAN_COLUMNS: { id: KanbanColumnId; title: string }[] = [
-  { id: "toExplore", title: "To Explore" },
-  { id: "inProgress", title: "In Progress" },
-  { id: "inReview", title: "In Review" },
-  { id: "done", title: "Done" },
-];
-
 interface IssuesState {
-  issuesById: Record<number, GithubIssue>;
-  columns: Record<KanbanColumnId, number[]>; // issue ids per column
   repoFullName: string | null;
-  raw: string | null;
-  parseFailed: boolean;
-  status: "idle" | "loading" | "succeeded" | "failed";
+  issues: GithubIssue[];
+  nextCursor: string;
+  hasMore: boolean;
+  status: "idle" | "loading" | "loadingMore" | "succeeded" | "failed";
   error: string | null;
+  parseFailed: boolean;
+  raw: string | null;
 }
 
 const initialState: IssuesState = {
-  issuesById: {},
-  columns: { toExplore: [], inProgress: [], inReview: [], done: [] },
   repoFullName: null,
-  raw: null,
-  parseFailed: false,
+  issues: [],
+  nextCursor: "",
+  hasMore: false,
   status: "idle",
   error: null,
+  parseFailed: false,
+  raw: null,
 };
 
 export const fetchIssuesForRepo = createAsyncThunk(
-  "issues/discover",
+  "issues/fetch",
   async (repoFullName: string, { rejectWithValue }) => {
     try {
-      const res = await api.post("/api/issues/discover", { repoFullName });
-      return {
-        repoFullName,
-        ...(res.data as {
-          issues: GithubIssue[];
-          raw: string;
-          parseFailed: boolean;
-        }),
+      const res = await api.post("/api/issues/fetch", { repoFullName });
+      return { ...res.data, repoFullName } as {
+        issues: GithubIssue[];
+        nextCursor: string;
+        raw: string;
+        parseFailed: boolean;
+        repoFullName: string;
       };
     } catch (err: any) {
       return rejectWithValue(
         err.response?.data?.error || "Failed to fetch issues",
+      );
+    }
+  },
+);
+
+export const fetchMoreIssues = createAsyncThunk(
+  "issues/fetchMore",
+  async (_, { getState, rejectWithValue }) => {
+    const state = getState() as RootState;
+    const { repoFullName, nextCursor } = state.issues;
+    if (!repoFullName || !nextCursor) return rejectWithValue("No more issues");
+    try {
+      const res = await api.post("/api/issues/fetch", {
+        repoFullName,
+        after: nextCursor,
+      });
+      return res.data as {
+        issues: GithubIssue[];
+        nextCursor: string;
+        raw: string;
+        parseFailed: boolean;
+      };
+    } catch (err: any) {
+      return rejectWithValue(
+        err.response?.data?.error || "Failed to fetch more issues",
       );
     }
   },
@@ -69,48 +82,42 @@ const issuesSlice = createSlice({
   initialState,
   reducers: {
     resetIssues: () => initialState,
-    moveIssue: (
-      state,
-      action: { payload: { issueId: number; toColumn: KanbanColumnId } },
-    ) => {
-      const { issueId, toColumn } = action.payload;
-      (Object.keys(state.columns) as KanbanColumnId[]).forEach((col) => {
-        state.columns[col] = state.columns[col].filter((id) => id !== issueId);
-      });
-      state.columns[toColumn].push(issueId);
-    },
   },
   extraReducers: (builder) => {
     builder
       .addCase(fetchIssuesForRepo.pending, (state) => {
         state.status = "loading";
         state.error = null;
+        state.issues = [];
       })
       .addCase(fetchIssuesForRepo.fulfilled, (state, action) => {
         state.status = "succeeded";
         state.repoFullName = action.payload.repoFullName;
-        state.raw = action.payload.raw;
+        state.issues = action.payload.issues;
+        state.nextCursor = action.payload.nextCursor;
+        state.hasMore = Boolean(action.payload.nextCursor);
         state.parseFailed = action.payload.parseFailed;
-
-        state.issuesById = {};
-        state.columns = {
-          toExplore: [],
-          inProgress: [],
-          inReview: [],
-          done: [],
-        };
-
-        action.payload.issues.forEach((issue) => {
-          state.issuesById[issue.id] = issue;
-          state.columns.toExplore.push(issue.id);
-        });
+        state.raw = action.payload.raw;
       })
       .addCase(fetchIssuesForRepo.rejected, (state, action) => {
         state.status = "failed";
+        state.error = action.payload as string;
+      })
+      .addCase(fetchMoreIssues.pending, (state) => {
+        state.status = "loadingMore";
+      })
+      .addCase(fetchMoreIssues.fulfilled, (state, action) => {
+        state.status = "succeeded";
+        state.issues = [...state.issues, ...action.payload.issues];
+        state.nextCursor = action.payload.nextCursor;
+        state.hasMore = Boolean(action.payload.nextCursor);
+      })
+      .addCase(fetchMoreIssues.rejected, (state, action) => {
+        state.status = "succeeded";
         state.error = action.payload as string;
       });
   },
 });
 
-export const { resetIssues, moveIssue } = issuesSlice.actions;
+export const { resetIssues } = issuesSlice.actions;
 export default issuesSlice.reducer;
