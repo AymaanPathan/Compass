@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { agentClient, OSS_ISSUES_AGENT_NAME } from "../services/agentClient";
+import { withAgentRetry } from "../utils/retryAgentTurn";
 
 const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
@@ -36,22 +37,11 @@ function parseIssuesResponse(
   }
 }
 
-router.post("/fetch", async (req: Request, res: Response) => {
-  try {
-    const { repoFullName, after } = req.body;
-    if (!repoFullName) {
-      return res
-        .status(400)
-        .json({ success: false, error: "repoFullName is required" });
-    }
-
+async function runIssuesAgent(prompt: string): Promise<string> {
+  return withAgentRetry(async () => {
     const session = await agentClient.createSession({
       agentName: OSS_ISSUES_AGENT_NAME,
     });
-
-    const prompt = after
-      ? `Repository: ${repoFullName}\nAfter cursor: ${after}`
-      : `Repository: ${repoFullName}`;
 
     const turn = session.prepareTurn({
       input: [{ type: "user.message", content: prompt }],
@@ -67,9 +57,34 @@ router.post("/fetch", async (req: Request, res: Response) => {
           JSON.stringify(data.event),
         );
       }
+      // Surface turn-level errors (like the 429 you saw) as a real throw
+      // so withAgentRetry can catch and retry them.
+      if (
+        data.event?.type === "turn.done" &&
+        data.event?.state?.status === "error"
+      ) {
+        throw new Error(data.event.state.message || "Agent turn failed");
+      }
     }
 
-    finalText = finalText.trim();
+    return finalText.trim();
+  });
+}
+
+router.post("/fetch", async (req: Request, res: Response) => {
+  try {
+    const { repoFullName, after } = req.body;
+    if (!repoFullName) {
+      return res
+        .status(400)
+        .json({ success: false, error: "repoFullName is required" });
+    }
+
+    const prompt = after
+      ? `Repository: ${repoFullName}\nAfter cursor: ${after}`
+      : `Repository: ${repoFullName}`;
+
+    const finalText = await runIssuesAgent(prompt);
     const parsed = parseIssuesResponse(finalText);
 
     if (!parsed) {

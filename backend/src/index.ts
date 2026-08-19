@@ -9,6 +9,7 @@ import githubRoutes from "./routes/github";
 import mcpRoutes from "./routes/mcp";
 import ossRoutes from "./routes/oss";
 import issuesRoutes from "./routes/issues";
+import investigateRoutes from "./routes/investigate";
 
 
 
@@ -31,6 +32,7 @@ app.use("/api/github", githubRoutes);
 app.use("/api/mcp", mcpRoutes);
 app.use("/api/oss", ossRoutes);
 app.use("/api/issues", issuesRoutes);
+app.use("/api/investigate", investigateRoutes);
 
 
 const openai = new OpenAI({

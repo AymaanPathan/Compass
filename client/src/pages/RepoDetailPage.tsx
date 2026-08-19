@@ -1,9 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "../store/store";
 import { fetchIssuesForRepo, resetIssues } from "../store/issuesSlice";
+import { resetInvestigation } from "../store/investigationSlice";
 import IssuesPanel from "../components/IssuesPanel";
+import InvestigationPanel from "../components/InvestigationPanel";
+import CodeViewerModal from "../components/CodeViewerModal";
 
 function RepoDetailPage() {
   const { owner, repo } = useParams<{ owner: string; repo: string }>();
@@ -13,10 +16,21 @@ function RepoDetailPage() {
 
   const repoFullName = `${owner}/${repo}`;
 
+  // Guards against React StrictMode's double-invoke in dev, and against
+  // any accidental double-mount, which was firing two parallel agent
+  // sessions for the same repo and triggering 429s.
+  const firedForRef = useRef<string | null>(null);
+
   useEffect(() => {
+    if (firedForRef.current === repoFullName) return;
+    firedForRef.current = repoFullName;
+
     dispatch(fetchIssuesForRepo(repoFullName));
+
     return () => {
       dispatch(resetIssues());
+      dispatch(resetInvestigation());
+      firedForRef.current = null;
     };
   }, [repoFullName, dispatch]);
 
@@ -86,8 +100,11 @@ function RepoDetailPage() {
             Open issues
           </h2>
           <IssuesPanel />
+          <InvestigationPanel />
         </section>
       </main>
+
+      <CodeViewerModal />
     </div>
   );
 }
