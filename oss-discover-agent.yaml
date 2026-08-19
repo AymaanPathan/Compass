@@ -541,15 +541,11 @@ mcp_servers:
 
     enable_tools:
       - search_repositories
-      - list_issues
-      - issue_read
 
     preload: true
 
     preload_tools:
       - search_repositories
-      - list_issues
-      - issue_read
 
     require_approval_for_tools:
       - "@write"

@@ -1,0 +1,67 @@
+type: truefoundry-agent
+name: oss-issues-agent
+
+description: Fetch open GitHub issues for a selected repository.
+
+source:
+  type: inline
+
+collaborators:
+  - role_id: agent-manager
+    subject: user:aymaanpathan5@gmail.com
+
+  - role_id: agent-access
+    subject: team:everyone
+
+config:
+  ask_user_questions:
+    enabled: false
+
+  context_management:
+    compaction:
+      enabled: true
+      compaction_threshold_tokens: 12000
+
+  dynamic_sub_agents:
+    enabled: false
+
+  generative_ui:
+    enabled: false
+
+  iteration_limit: 2
+
+  sandbox:
+    enabled: false
+
+instructions: |
+  Fetch open issues for the provided GitHub repository.
+
+  Extract owner and repo, then call list_issues once.
+
+  Return only:
+  - issue number
+  - title
+  - labels
+  - URL
+  - short description
+
+  Do not analyze, rank, or inspect individual issues.
+
+  If no issues exist, say so.
+
+mcp_servers:
+  - type: truefoundry-mcp-registry
+    name: github
+
+    enable_tools:
+      - list_issues
+
+    preload: true
+
+    preload_tools:
+      - list_issues
+
+model:
+  name: cerebras/gpt-oss-120b
+  params:
+    max_tokens: 1500
