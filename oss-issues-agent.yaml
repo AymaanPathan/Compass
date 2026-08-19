@@ -9,7 +9,7 @@ collaborators:
     subject: team:everyone
 
 description: >-
-  Fetches a small paginated set of open GitHub issues for a selected repository.
+  Fetches one paginated page of open GitHub issues for a selected repository.
 
 config:
   ask_user_questions:
@@ -35,45 +35,40 @@ config:
     enabled: false
 
 instructions: |
-  Fetch a page of open GitHub issues for the provided repository.
+  Fetch one page of open GitHub issues for the provided repository.
 
-  Extract the repository owner and name.
+  Extract the repository owner and repository name.
 
-  Call list_issues exactly once using:
-
+  Call list_issues exactly once with:
   - state: OPEN
   - perPage: 10
   - fields: number, title, labels
 
-  PAGINATION
+  If the input contains an "After" cursor, pass it unchanged
+  as the after parameter.
 
-  For the first request, do not provide an after cursor.
+  Do not fetch additional pages.
 
-  If the input contains an "after" cursor, pass it unchanged to
-  list_issues in the after parameter.
+  After list_issues returns, do not call any more tools.
 
-  Never fetch additional pages automatically.
+  Return valid JSON only in exactly this format:
 
-  After list_issues succeeds, immediately return the final answer.
-  Do not call any more tools.
+  {
+    "issues": [
+      {
+        "number": 123,
+        "title": "Issue title",
+        "labels": ["label1"],
+        "url": "https://github.com/owner/repo/issues/123"
+      }
+    ],
+    "nextCursor": "cursor-or-empty-string"
+  }
 
-  Return only the fetched issues:
+  Construct each URL using the repository owner, repository name,
+  and issue number.
 
-  ## #<issue number> — <title>
-
-  **Labels:** <comma-separated labels or None>
-
-  If no issues are found, say:
-  No open issues found.
-
-  Do not include issue bodies, descriptions, summaries, analysis,
-  ranking, recommendations, or any additional data.
-
-  If pagination information is available in the tool response, include:
-
-  Next cursor: <endCursor>
-
-  After returning the result, stop.
+  If there is no next page, set nextCursor to an empty string.
 
 mcp_servers:
   - type: truefoundry-mcp-registry
