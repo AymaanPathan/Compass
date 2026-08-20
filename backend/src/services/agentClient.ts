@@ -6,7 +6,8 @@ export const agentClient = new AgentSessionClient({
 });
 
 export const OSS_AGENT_NAME = "oss-discover-agent";
-export const OSS_ISSUES_AGENT_NAME = "oss-issues-agent";
-export const OSS_ISSUE_UNDERSTANDING_AGENT_NAME = "oss-issue-understanding-agent";
-
 export const DEV_PROFILE_AGENT_NAME = "developer-profile-agent";
+
+export const OSS_ISSUES_AGENT_NAME = "oss-issues-agent";
+export const OSS_ISSUE_UNDERSTANDING_AGENT_NAME =
+  "oss-issue-understanding-agent";
