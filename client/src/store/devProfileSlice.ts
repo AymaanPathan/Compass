@@ -39,12 +39,13 @@ const initialState: DevProfileState = {
   status: "idle",
   error: null,
 };
-
 export const fetchDeveloperProfile = createAsyncThunk(
   "devProfile/fetch",
-  async (_, { rejectWithValue }) => {
+  async (opts: { refresh?: boolean } | undefined, { rejectWithValue }) => {
     try {
-      const res = await api.get("/api/github/profile");
+      const res = await api.get("/api/github/profile", {
+        params: opts?.refresh ? { refresh: "true" } : undefined,
+      });
       return res.data;
     } catch (err: any) {
       return rejectWithValue(

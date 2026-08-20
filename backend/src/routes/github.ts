@@ -58,11 +58,38 @@ function parseProfileResponse(text: string): DeveloperProfile | null {
   }
 }
 
-async function runProfileAgent(prompt: string): Promise<string> {
+// Agent Harness session, not the Gateway's stateless chat pattern.
+// We persist session.id on the user doc and resume via getSession()
+// instead of creating a new session (and losing context) on every call.
+async function getOrCreateProfileSession(user: any) {
+  if (user.developerProfileSessionId) {
+    try {
+      return await agentClient.getSession({
+        sessionId: user.developerProfileSessionId,
+      });
+    } catch (err) {
+      // session may have expired / been GC'd server-side — fall through
+      // and create a fresh one rather than hard-failing the request
+      console.warn(
+        "Stored developer-profile session invalid, creating a new one:",
+        err,
+      );
+    }
+  }
+
+  const session = await agentClient.createSession({
+    agentName: DEV_PROFILE_AGENT_NAME,
+  });
+
+  user.developerProfileSessionId = session.id;
+  await user.save();
+
+  return session;
+}
+
+async function runProfileAgent(prompt: string, user: any): Promise<string> {
   return withAgentRetry(async () => {
-    const session = await agentClient.createSession({
-      agentName: DEV_PROFILE_AGENT_NAME,
-    });
+    const session = await getOrCreateProfileSession(user);
 
     const turn = session.prepareTurn({
       input: [{ type: "user.message", content: prompt }],
@@ -90,10 +117,6 @@ async function runProfileAgent(prompt: string): Promise<string> {
   });
 }
 
-// Cheap, no-agent read: just the GitHub stack + repo list. This is what
-// AgentWorkspace (and anything else that needs stack/repos, not the
-// AI-generated narrative) should call — it's a plain GitHub API read,
-// no LLM turn involved, so it's fast and safe to call on every page load.
 router.get("/stack", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const user = await User.findById(req.userId);
@@ -133,28 +156,55 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, error: "User not found" });
     }
 
-    const stackData = await fetchGithubStackData(user.accessToken);
+    const forceRefresh = req.query.refresh === "true";
 
-    const finalText = await runProfileAgent(JSON.stringify(stackData));
+    // Serve cached profile unless caller explicitly wants a fresh one
+    if (!forceRefresh && user.developerProfile) {
+      return res.json({
+        success: true,
+        profile: user.developerProfile,
+        raw: user.developerProfileRaw ?? null,
+        parseFailed: user.developerProfileParseFailed ?? false,
+        cached: true,
+        generatedAt: user.developerProfileGeneratedAt,
+      });
+    }
+
+    const stackData = await fetchGithubStackData(user.accessToken);
+    const finalText = await runProfileAgent(JSON.stringify(stackData), user);
     const profile = parseProfileResponse(finalText);
 
     if (!profile) {
       console.warn(
         "Developer profile agent: failed to parse JSON, returning raw fallback",
       );
+      user.developerProfileRaw = finalText;
+      user.developerProfileParseFailed = true;
+      user.developerProfileGeneratedAt = new Date();
+      await user.save();
+
       return res.json({
         success: true,
         profile: null,
         raw: finalText,
         parseFailed: true,
+        cached: false,
       });
     }
+
+    user.developerProfile = profile as any;
+    user.developerProfileRaw = finalText;
+    user.developerProfileParseFailed = false;
+    user.developerProfileGeneratedAt = new Date();
+    await user.save();
 
     return res.json({
       success: true,
       profile,
       raw: finalText,
       parseFailed: false,
+      cached: false,
+      generatedAt: user.developerProfileGeneratedAt,
     });
   } catch (error: any) {
     console.error(

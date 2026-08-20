@@ -22,7 +22,8 @@
     "mongodb": "^7.5.0",
     "mongoose": "^9.9.2",
     "openai": "^6.49.0",
-    "truefoundry-gateway-sdk": "^0.4.0"
+    "truefoundry-gateway-sdk": "^0.4.0",
+    "uuid": "^14.0.2"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
