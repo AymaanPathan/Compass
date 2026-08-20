@@ -13,12 +13,24 @@ function AgentPage() {
   const dispatch = useDispatch<AppDispatch>();
   const thinkingRef = useRef<HTMLPreElement>(null);
 
+  // Guards the auto-find dispatch against StrictMode double-invoke and
+  // HMR remounts within the same tab session. sessionStorage alone isn't
+  // enough because the read-then-remove isn't atomic against re-renders
+  // that happen before the removal is committed.
+  const autoFindTriggered = useRef(false);
+
   const { user } = useSelector((s: RootState) => s.auth);
   const { profile } = useSelector((s: RootState) => s.devProfile);
   const { repository, thinking, liveOutput, status, error, parseFailed, raw } =
     useSelector((s: RootState) => s.oss);
 
   useEffect(() => {
+    console.log("[AgentPage effect]", {
+      user: !!user,
+      profile: !!profile,
+      status,
+    });
+
     if (!user) {
       navigate("/", { replace: true });
       return;
@@ -27,12 +39,26 @@ function AgentPage() {
       navigate("/analysis", { replace: true });
       return;
     }
+
     const shouldAutoFind = sessionStorage.getItem("compass_auto_find") === "1";
-    if (shouldAutoFind && status === "idle") {
+    if (shouldAutoFind && status === "idle" && !autoFindTriggered.current) {
+      autoFindTriggered.current = true;
       sessionStorage.removeItem("compass_auto_find");
       dispatch(findOssRepository());
     }
-  }, [user, profile, status, dispatch, navigate]);
+    // Intentionally omitting `status` here: this effect only needs to run
+    // when identity/profile change or on mount. Including status caused it
+    // to re-fire on every loading -> succeeded/failed transition, which
+    // just re-ran the nav guards and auto-find check for no reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, profile, dispatch, navigate]);
+
+  useEffect(() => {
+    console.log("[AgentPage] MOUNTED");
+    return () => {
+      console.log("[AgentPage] UNMOUNTED");
+    };
+  }, []);
 
   useEffect(() => {
     thinkingRef.current?.scrollTo({ top: thinkingRef.current.scrollHeight });
@@ -179,7 +205,7 @@ function AgentPage() {
               </span>
             </p>
 
-            <a            
+            <a
               href={repository.url}
               target="_blank"
               rel="noreferrer"

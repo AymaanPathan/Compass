@@ -1,4 +1,3 @@
-// backend/src/server.ts
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
@@ -10,6 +9,13 @@ import mcpRoutes from "./routes/mcp";
 import ossRoutes from "./routes/oss";
 import issuesRoutes from "./routes/issues";
 import investigateRoutes from "./routes/investigate";
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("UNHANDLED REJECTION:", err);
+});
 
 const app = express();
 const PORT = process.env.PORT || 5000;
