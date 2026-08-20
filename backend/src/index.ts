@@ -32,8 +32,8 @@ app.use("/api/github", githubRoutes);
 app.use("/api/mcp", mcpRoutes);
 app.use("/api/oss", ossRoutes);
 app.use("/api/issues", issuesRoutes);
-app.use("/api/investigate", investigateRoutes);
-
+app.use("/api/investigate-issue", investigateRoutes);
+console.log("investigate routes mounted"); 
 
 const openai = new OpenAI({
   apiKey: process.env.TFY_API_KEY,

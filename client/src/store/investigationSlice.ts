@@ -88,7 +88,7 @@ export const investigateIssue = createAsyncThunk(
     { rejectWithValue },
   ) => {
     try {
-      const res = await api.post("/api/investigate", payload);
+      const res = await api.post("/api/investigate-issue", payload);
       return { ...res.data, ...payload } as {
         investigation: IssueInvestigation | null;
         raw: string;

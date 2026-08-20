@@ -44,7 +44,7 @@ export const fetchDeveloperProfile = createAsyncThunk(
   "devProfile/fetch",
   async (_, { rejectWithValue }) => {
     try {
-      const res = await api.get("/api/investigate/profile");
+      const res = await api.get("/api/github/profile");
       return res.data;
     } catch (err: any) {
       return rejectWithValue(
