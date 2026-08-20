@@ -2,7 +2,6 @@ import { Router, Response } from "express";
 import User from "../models/User";
 import { requireAuth, AuthRequest } from "../middleware/auth";
 import { agentClient, DEV_PROFILE_AGENT_NAME } from "../services/agentClient";
-import { fetchGithubStackData } from "../utils/githubData";
 import { withAgentRetry } from "../utils/retryAgentTurn";
 
 const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
@@ -64,16 +63,13 @@ function parseProfileResponse(text: string): DeveloperProfile | null {
 async function getOrCreateProfileSession(user: any) {
   if (user.developerProfileSessionId) {
     try {
+      console.log("♻️ Reusing session:", user.developerProfileSessionId);
+
       return await agentClient.getSession({
         sessionId: user.developerProfileSessionId,
       });
     } catch (err) {
-      // session may have expired / been GC'd server-side — fall through
-      // and create a fresh one rather than hard-failing the request
-      console.warn(
-        "Stored developer-profile session invalid, creating a new one:",
-        err,
-      );
+      console.warn("Session invalid, creating new one");
     }
   }
 
@@ -81,18 +77,35 @@ async function getOrCreateProfileSession(user: any) {
     agentName: DEV_PROFILE_AGENT_NAME,
   });
 
+  console.log("🆕 Created session:", session.id);
+
   user.developerProfileSessionId = session.id;
   await user.save();
 
   return session;
 }
 
-async function runProfileAgent(prompt: string, user: any): Promise<string> {
+// The developer-profile-agent has its own GitHub MCP tools (get_me,
+// search_repositories, list_commits, search_code) preloaded — it gathers
+// evidence itself. We no longer fetch/pass stack data; we just trigger
+// the analysis instruction and let the agent do its own GitHub exploration.
+//
+// ⚠️ This assumes the agent's GitHub MCP connection resolves to the
+// correct per-request user. If it's a single shared connection, every
+// call analyzes the same GitHub identity regardless of who's logged
+// into Compass — verify this before relying on it in production.
+async function runProfileAgent(user: any): Promise<string> {
   return withAgentRetry(async () => {
     const session = await getOrCreateProfileSession(user);
 
     const turn = session.prepareTurn({
-      input: [{ type: "user.message", content: prompt }],
+      input: [
+        {
+          type: "user.message",
+          content:
+            "Analyze the authenticated developer's GitHub profile and repositories now, using the GitHub MCP tools available to you. Produce the developer profile exactly as specified in your instructions.",
+        },
+      ],
     });
 
     let finalText = "";
@@ -117,38 +130,6 @@ async function runProfileAgent(prompt: string, user: any): Promise<string> {
   });
 }
 
-router.get("/stack", requireAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
-    }
-
-    const { stack, repos } = await fetchGithubStackData(user.accessToken);
-
-    return res.json({ success: true, stack, repos });
-  } catch (error: any) {
-    console.error(
-      "GitHub stack fetch error:",
-      error.response?.data || error.message,
-    );
-
-    if (error.response?.status === 401) {
-      return res.status(401).json({
-        success: false,
-        error: "GitHub token invalid, please log in again",
-      });
-    }
-
-    res
-      .status(500)
-      .json({ success: false, error: "Failed to fetch GitHub stack" });
-  }
-});
-
-// AI-generated developer profile — the narrative/archetype content for the
-// Analysis page. Runs a full agent turn, so it's slower; only call this
-// where the profile itself is actually shown.
 router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const user = await User.findById(req.userId);
@@ -170,8 +151,7 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const stackData = await fetchGithubStackData(user.accessToken);
-    const finalText = await runProfileAgent(JSON.stringify(stackData), user);
+    const finalText = await runProfileAgent(user);
     const profile = parseProfileResponse(finalText);
 
     if (!profile) {

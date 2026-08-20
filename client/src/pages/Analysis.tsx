@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "../store/store";
-import { fetchGithubProfile } from "../store/githubSlice";
 import { fetchDeveloperProfile } from "../store/devProfileSlice";
 
 const FONT_DISPLAY = "'Fraunces', ui-serif, Georgia, serif";
@@ -13,9 +12,6 @@ function Analysis() {
   const dispatch = useDispatch<AppDispatch>();
 
   const { user, status } = useSelector((s: RootState) => s.auth);
-  const { stack, status: githubStatus } = useSelector(
-    (s: RootState) => s.github,
-  );
   const {
     profile,
     parseFailed,
@@ -32,16 +28,10 @@ function Analysis() {
   }, [status, user, navigate]);
 
   useEffect(() => {
-    if (status === "authenticated") {
-      dispatch(fetchGithubProfile());
-    }
-  }, [status, dispatch]);
-
-  useEffect(() => {
-    if (githubStatus === "succeeded" && profileStatus === "idle") {
+    if (status === "authenticated" && profileStatus === "idle") {
       dispatch(fetchDeveloperProfile());
     }
-  }, [githubStatus, profileStatus, dispatch]);
+  }, [status, profileStatus, dispatch]);
 
   const handleFindRepos = () => {
     sessionStorage.setItem("compass_auto_find", "1");
@@ -56,11 +46,7 @@ function Analysis() {
     );
   }
 
-  const isAnalyzing =
-    githubStatus === "loading" ||
-    githubStatus === "idle" ||
-    profileStatus === "loading" ||
-    profileStatus === "idle";
+  const isAnalyzing = profileStatus === "loading" || profileStatus === "idle";
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -220,16 +206,6 @@ function Analysis() {
                 ))}
               </div>
             </Section>
-
-            {stack && (
-              <p
-                className="mt-10 text-[11px] text-neutral-600"
-                style={{ fontFamily: FONT_MONO }}
-              >
-                based on {stack.totalRepos} repos · {stack.totalStars} stars ·{" "}
-                {stack.originalRepos} original
-              </p>
-            )}
 
             <button
               onClick={handleFindRepos}
