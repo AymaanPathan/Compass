@@ -5,7 +5,7 @@ import type { AppDispatch } from "./store/store";
 import { fetchCurrentUser } from "./store/authSlice";
 import Landing from "./pages/Landing";
 import Analysis from "./pages/Analysis";
-import Course from "./pages/Course";
+import AgentWorkspace from "./pages/AgentWorkspace";
 import RepoDetailPage from "./pages/RepoDetailPage";
 
 function App() {
@@ -19,7 +19,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/analysis" element={<Analysis />} />
-      <Route path="/course" element={<Course />} />
+      <Route path="/agent" element={<AgentWorkspace />} />
       <Route path="/repo/:owner/:repo" element={<RepoDetailPage />} />
     </Routes>
   );

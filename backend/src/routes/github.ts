@@ -90,6 +90,42 @@ async function runProfileAgent(prompt: string): Promise<string> {
   });
 }
 
+// Cheap, no-agent read: just the GitHub stack + repo list. This is what
+// AgentWorkspace (and anything else that needs stack/repos, not the
+// AI-generated narrative) should call — it's a plain GitHub API read,
+// no LLM turn involved, so it's fast and safe to call on every page load.
+router.get("/stack", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User not found" });
+    }
+
+    const { stack, repos } = await fetchGithubStackData(user.accessToken);
+
+    return res.json({ success: true, stack, repos });
+  } catch (error: any) {
+    console.error(
+      "GitHub stack fetch error:",
+      error.response?.data || error.message,
+    );
+
+    if (error.response?.status === 401) {
+      return res.status(401).json({
+        success: false,
+        error: "GitHub token invalid, please log in again",
+      });
+    }
+
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch GitHub stack" });
+  }
+});
+
+// AI-generated developer profile — the narrative/archetype content for the
+// Analysis page. Runs a full agent turn, so it's slower; only call this
+// where the profile itself is actually shown.
 router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const user = await User.findById(req.userId);

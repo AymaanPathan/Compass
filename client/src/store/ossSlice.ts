@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
-import api from "../api/axios";
 import type { RootState } from "./store";
 
 export interface RepoRecommendation {
@@ -26,6 +25,13 @@ export const OSS_COLUMNS: { id: OssColumnId; title: string; hint: string }[] = [
   { id: "selected", title: "Selected", hint: "Your pick" },
 ];
 
+interface DiscoverResult {
+  repositories: RepoRecommendation[];
+  bestMatch: BestMatch | null;
+  raw: string;
+  parseFailed: boolean;
+}
+
 interface OssState {
   repositories: RepoRecommendation[];
   bestMatch: BestMatch | null;
@@ -33,6 +39,8 @@ interface OssState {
   columns: Record<OssColumnId, string[]>; // repo.url[]
   parseFailed: boolean;
   raw: string | null;
+  liveOutput: string; // streamed text from the agent, accumulated live
+  sessionId: string | null;
   status: "idle" | "loading" | "succeeded" | "failed";
   error: string | null;
 }
@@ -50,35 +58,101 @@ const initialState: OssState = {
   columns: emptyColumns,
   parseFailed: false,
   raw: null,
+  liveOutput: "",
+  sessionId: null,
   status: "idle",
   error: null,
 };
 
-export const findOssProjects = createAsyncThunk(
-  "oss/discover",
-  async (_, { getState, rejectWithValue }) => {
+// Reads the /api/oss/discover SSE stream and dispatches liveOutput/session
+// updates as they arrive, resolving once the "done" event lands (or
+// rejecting on "error" / a network failure / a stream that never sends
+// "done").
+export const findOssProjects = createAsyncThunk<
+  DiscoverResult,
+  void,
+  { state: RootState; rejectValue: string }
+>("oss/discover", async (_, { getState, dispatch, rejectWithValue }) => {
+  const state = getState();
+  const { stack, repos } = state.github;
+
+  if (!stack) {
+    return rejectWithValue("GitHub stack not loaded yet");
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/oss/discover`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ stack, repos }),
+      },
+    );
+  } catch {
+    return rejectWithValue("Couldn't reach the agent service");
+  }
+
+  if (!res.ok || !res.body) {
+    return rejectWithValue(`Discover request failed (${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: DiscoverResult | null = null;
+  let streamError: string | null = null;
+
+  const handleEvent = (rawEvent: string) => {
+    const lines = rawEvent.split("\n");
+    const eventLine = lines.find((l) => l.startsWith("event:"));
+    const dataLine = lines.find((l) => l.startsWith("data:"));
+    if (!eventLine || !dataLine) return;
+
+    const event = eventLine.replace("event:", "").trim();
+    let data: any;
     try {
-      const state = getState() as RootState;
-      const { stack, repos } = state.github;
-
-      if (!stack) {
-        return rejectWithValue("GitHub stack not loaded yet");
-      }
-
-      const res = await api.post("/api/oss/discover", { stack, repos });
-      return res.data as {
-        repositories: RepoRecommendation[];
-        bestMatch: BestMatch | null;
-        raw: string;
-        parseFailed: boolean;
-      };
-    } catch (err: any) {
-      return rejectWithValue(
-        err.response?.data?.error || "Failed to get OSS recommendation",
-      );
+      data = JSON.parse(dataLine.replace("data:", "").trim());
+    } catch {
+      return;
     }
-  },
-);
+
+    if (event === "session") {
+      dispatch(streamSession(data.sessionId ?? null));
+    } else if (event === "chunk") {
+      dispatch(streamChunk(data.content ?? ""));
+    } else if (event === "error") {
+      streamError = data.error || "Agent session failed";
+    } else if (event === "done") {
+      result = data as DiscoverResult;
+    }
+  };
+
+  while (true) {
+    let readResult: ReadableStreamReadResult<Uint8Array>;
+    try {
+      readResult = await reader.read();
+    } catch {
+      return rejectWithValue("Connection to agent lost mid-stream");
+    }
+    const { value, done } = readResult;
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+    for (const rawEvent of events) handleEvent(rawEvent);
+  }
+
+  // Flush any trailing event left in the buffer without a final \n\n.
+  if (buffer.trim()) handleEvent(buffer);
+
+  if (streamError) return rejectWithValue(streamError);
+  if (!result) return rejectWithValue("Agent stream ended without a result");
+  return result;
+});
 
 const ossSlice = createSlice({
   name: "oss",
@@ -91,6 +165,8 @@ const ossSlice = createSlice({
       state.columns = emptyColumns;
       state.parseFailed = false;
       state.raw = null;
+      state.liveOutput = "";
+      state.sessionId = null;
       state.status = "idle";
       state.error = null;
     },
@@ -115,6 +191,12 @@ const ossSlice = createSlice({
         if (repo) state.selectedRepo = repo;
       }
     },
+    streamSession: (state, action: { payload: string | null }) => {
+      state.sessionId = action.payload;
+    },
+    streamChunk: (state, action: { payload: string }) => {
+      state.liveOutput += action.payload;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -122,6 +204,8 @@ const ossSlice = createSlice({
         state.status = "loading";
         state.error = null;
         state.selectedRepo = null;
+        state.liveOutput = "";
+        state.sessionId = null;
       })
       .addCase(findOssProjects.fulfilled, (state, action) => {
         state.status = "succeeded";
@@ -147,5 +231,7 @@ export const {
   selectRepository,
   clearSelectedRepository,
   moveRepoToColumn,
+  streamSession,
+  streamChunk,
 } = ossSlice.actions;
 export default ossSlice.reducer;

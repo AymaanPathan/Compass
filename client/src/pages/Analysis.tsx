@@ -45,7 +45,7 @@ function Analysis() {
 
   const handleFindRepos = () => {
     sessionStorage.setItem("compass_auto_find", "1");
-    navigate("/course");
+    navigate("/agent");
   };
 
   if (status === "loading" || status === "idle" || !user) {

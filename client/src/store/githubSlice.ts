@@ -45,11 +45,11 @@ export const fetchGithubProfile = createAsyncThunk(
   "github/fetchProfile",
   async (_, { rejectWithValue }) => {
     try {
-      const res = await api.get("/api/github/profile");
-      return res.data;
+      const res = await api.get("/api/github/stack");
+      return res.data; // { success, stack, repos }
     } catch (err: any) {
       return rejectWithValue(
-        err.response?.data?.error || "Failed to fetch GitHub profile",
+        err.response?.data?.error || "Failed to fetch GitHub stack",
       );
     }
   },

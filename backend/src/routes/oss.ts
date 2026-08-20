@@ -125,18 +125,43 @@ function parseRecommendations(text: string): {
   return { repositories, bestMatch };
 }
 
+// Streams the agent's execution live over SSE instead of buffering the
+// whole run and returning one JSON blob at the end. Event types sent:
+//   session -> { sessionId }        once, right after the session is created
+//   chunk   -> { content }          for every streamed text delta from the agent
+//   done    -> { repositories, bestMatch, raw, parseFailed }   once, on success
+//   error   -> { error }            once, on failure
 router.post("/discover", async (req: Request, res: Response) => {
-  try {
-    const { stack, repos } = req.body;
-    if (!stack) {
-      return res
-        .status(400)
-        .json({ success: false, error: "stack is required" });
-    }
+  const { stack, repos } = req.body;
 
+  if (!stack) {
+    return res.status(400).json({ success: false, error: "stack is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // If the client disconnects mid-stream, stop writing — nothing else to
+  // do here since the underlying agent turn has no cancel hook exposed.
+  let clientGone = false;
+  req.on("close", () => {
+    clientGone = true;
+  });
+
+  try {
     const session = await agentClient.createSession({
       agentName: OSS_AGENT_NAME,
     });
+
+    if (clientGone) return;
+    send("session", { sessionId: (session as any).id ?? null });
+
     const turn = session.prepareTurn({
       input: [
         { type: "user.message", content: buildStackPrompt(stack, repos) },
@@ -145,8 +170,13 @@ router.post("/discover", async (req: Request, res: Response) => {
 
     let finalText = "";
     for await (const data of turn.execute({ stream: true })) {
+      if (clientGone) return;
+
       const chunk = extractText(data.event);
-      if (chunk) finalText += chunk;
+      if (chunk) {
+        finalText += chunk;
+        send("chunk", { content: chunk });
+      }
       if (DEBUG_AGENT_EVENTS) {
         console.log(
           `[agent event] ${data.event?.type}`,
@@ -155,37 +185,40 @@ router.post("/discover", async (req: Request, res: Response) => {
       }
     }
 
+    if (clientGone) return;
+
     finalText = finalText.trim();
     const { repositories, bestMatch } = parseRecommendations(finalText);
 
     if (repositories.length === 0) {
       // Parsing failed — the agent didn't follow the format exactly.
-      // Fall back to raw text so the frontend can still show *something*
-      // instead of a blank screen, and flag it so we can debug the format.
+      // Send the raw text through so the frontend can still show
+      // *something* instead of a blank screen, flagged for debugging.
       console.warn(
-        "OSS discover: parsed 0 repositories from agent output, returning raw fallback",
+        "OSS discover: parsed 0 repositories from agent output, sending raw fallback",
       );
-      return res.json({
-        success: true,
+      send("done", {
         repositories: [],
         bestMatch: null,
         raw: finalText,
         parseFailed: true,
-        status: turn?.state?.status,
       });
+      return res.end();
     }
 
-    return res.json({
-      success: true,
+    send("done", {
       repositories,
       bestMatch,
       raw: finalText,
       parseFailed: false,
-      status: turn?.state?.status,
     });
+    res.end();
   } catch (error: any) {
     console.error("OSS discover error:", error);
-    return res.status(500).json({ success: false, error: error.message });
+    if (!clientGone) {
+      send("error", { error: error.message || "Agent session failed" });
+      res.end();
+    }
   }
 });
 
