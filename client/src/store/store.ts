@@ -5,6 +5,8 @@ import ossReducer from "./ossSlice";
 import issuesReducer from "./issuesSlice";
 import investigationReducer from "./investigationSlice";
 import fileContentReducer from "./fileContentSlice";
+import devProfileReducer from "./devProfileSlice";
+
 
 export const store = configureStore({
   reducer: {
@@ -14,6 +16,7 @@ export const store = configureStore({
     issues: issuesReducer,
     investigation: investigationReducer,
     fileContent: fileContentReducer,
+    devProfile: devProfileReducer,
   },
 });
 
