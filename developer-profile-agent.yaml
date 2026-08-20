@@ -4,7 +4,7 @@ name: developer-profile-agent
 
 collaborators:
   - role_id: agent-manager
-    subject: user:aymaanpathan5@gmail.com
+    subject: user:aymaanpathan61@gmail.com
 
   - role_id: agent-access
     subject: team:everyone
