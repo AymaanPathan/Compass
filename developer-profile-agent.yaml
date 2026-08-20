@@ -813,7 +813,7 @@ mcp_servers:
       - "@destructive"
 
 model:
-  name: cerebras/gpt-oss-120b
+  name: gemma-4-31b
 
   params:
     max_tokens: 3000
