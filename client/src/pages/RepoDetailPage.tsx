@@ -42,7 +42,7 @@ function RepoDetailPage() {
             onClick={() => navigate("/")}
             className="text-xs text-neutral-500 hover:text-neutral-300 transition-colors"
           >
-            ← Back to dashboard
+            ← Back to analysis
           </button>
         </div>
       </header>
@@ -89,7 +89,7 @@ function RepoDetailPage() {
             </>
           ) : (
             <p className="mt-4 text-sm text-neutral-500">
-              No cached details for this repo — open it from the dashboard to
+              No cached details for this repo — open it from the analysis to
               see the full match summary.
             </p>
           )}

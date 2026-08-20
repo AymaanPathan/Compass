@@ -26,7 +26,7 @@ function Landing() {
 
   useEffect(() => {
     if (status !== "loading" && status !== "idle" && user) {
-      navigate("/dashboard", { replace: true });
+      navigate("/analysis", { replace: true });
     }
   }, [status, user, navigate]);
 
