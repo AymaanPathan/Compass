@@ -1,141 +1,78 @@
+// backend/src/routes/oss.ts
 import { Router, Request, Response } from "express";
 import { agentClient, OSS_AGENT_NAME } from "../services/agentClient";
+import {
+  isEventDelta,
+  mergeEventDelta,
+  type TurnEvent,
+} from "truefoundry-gateway-sdk/agents";
 
 const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
 
-interface LanguageStat {
-  language: string;
-  repoCount: number;
-}
-
-interface Repo {
-  fullName: string;
-  description: string | null;
-  language: string | null;
-}
-
-export interface RepoRecommendation {
-  rank: number;
+export interface KeyComponent {
   name: string;
+  description: string;
+}
+
+export interface OssRepository {
+  owner: string;
+  name: string;
+  fullName: string;
   url: string;
   description: string;
+  primaryTechnology: string;
+  fitScore: number;
   whyItMatches: string;
-  matchingTechnologies: string[];
-  matchScore: number;
+  whatItDoes: string;
+  keyComponents: KeyComponent[];
+  recommendedStartingPoint: string;
+  difficulty: string;
 }
 
-interface BestMatch {
-  name: string;
-  reason: string;
+function buildProfilePrompt(developerProfile: unknown) {
+  return `Developer Profile (JSON):
+${JSON.stringify(developerProfile, null, 2)}
+
+Find exactly one repository for this developer, following your instructions exactly. Return JSON only.`;
 }
 
-function buildStackPrompt(
-  stack: {
-    topLanguages: LanguageStat[];
-    totalRepos: number;
-    originalRepos: number;
-    totalStars: number;
-  },
-  repos: Repo[] = [],
-) {
-  const topLangs =
-    stack?.topLanguages
-      ?.map((l) => `${l.language} (${l.repoCount} repos)`)
-      .join(", ") || "Unknown";
+// Strips ```json fences if the model wraps output despite instructions,
+// then parses. Throws if the result still isn't a valid repository object.
+function parseRepository(text: string): OssRepository {
+  const cleaned = text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
 
-  const sampleRepos = repos
-    .slice(0, 5)
-    .map(
-      (r) =>
-        `- ${r.fullName}: ${r.description || "no description"} [${r.language || "n/a"}]`,
-    )
-    .join("\n");
+  const parsed = JSON.parse(cleaned);
+  const repo = parsed.repository ?? parsed;
 
-  return `Developer skill profile:
-Top languages: ${topLangs}
-Total repos: ${stack?.totalRepos ?? "unknown"}, Original: ${stack?.originalRepos ?? "unknown"}, Stars: ${stack?.totalStars ?? "unknown"}
-
-Recent repositories:
-${sampleRepos || "N/A"}
-
-Find 5 suitable open-source repositories that match this developer's skills, ranked by contribution potential.`;
-}
-
-function extractText(event: any): string | null {
-  if (!event) return null;
-  if (
-    (event.type === "model.message.delta" || event.type === "model.message") &&
-    typeof event.content === "string" &&
-    event.content.length > 0
-  ) {
-    return event.content;
+  if (!repo || !repo.fullName || !repo.url) {
+    throw new Error("Parsed JSON missing required repository fields");
   }
-  return null;
+  return repo as OssRepository;
 }
 
-// Parses the agent's fixed markdown format into structured repo objects.
-// Expected per-repo block:
-//   ## #1 — repo-name
-//   **URL:** https://...
-//   **Description:**
-//   ...
-//   **Why it matches:**
-//   ...
-//   **Matching technologies:**
-//   ...
-//   **Match Score:** 5/5
-function parseRecommendations(text: string): {
-  repositories: RepoRecommendation[];
-  bestMatch: BestMatch | null;
-} {
-  const repositories: RepoRecommendation[] = [];
-
-  const repoRegex =
-    /##\s*#(\d+)\s*[—-]\s*(.+?)\s*\n+\*\*URL:\*\*\s*(\S+)\s*\n+\*\*Description:\*\*\s*\n?(.+?)\s*\n+\*\*Why it matches:\*\*\s*\n?(.+?)\s*\n+\*\*Matching technologies:\*\*\s*\n?(.+?)\s*\n+\*\*Match Score:\*\*\s*(\d+(?:\.\d+)?)\s*\/\s*5/gs;
-
-  let match: RegExpExecArray | null;
-  while ((match = repoRegex.exec(text)) !== null) {
-    const [, rank, name, url, description, whyItMatches, techs, score] = match;
-    repositories.push({
-      rank: Number(rank),
-      name: name.trim(),
-      url: url.trim(),
-      description: description.trim(),
-      whyItMatches: whyItMatches.trim(),
-      matchingTechnologies: techs
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean),
-      matchScore: Number(score),
-    });
-  }
-
-  let bestMatch: BestMatch | null = null;
-  const bestMatchRegex =
-    /##\s*Best Match\s*\n+\*\*Repository:\*\*\s*(.+?)\s*\n+([\s\S]+?)$/;
-  const bestMatchResult = bestMatchRegex.exec(text);
-  if (bestMatchResult) {
-    bestMatch = {
-      name: bestMatchResult[1].trim(),
-      reason: bestMatchResult[2].trim(),
-    };
-  }
-
-  return { repositories, bestMatch };
-}
-
-// Streams the agent's execution live over SSE instead of buffering the
-// whole run and returning one JSON blob at the end. Event types sent:
-//   session -> { sessionId }        once, right after the session is created
-//   chunk   -> { content }          for every streamed text delta from the agent
-//   done    -> { repositories, bestMatch, raw, parseFailed }   once, on success
-//   error   -> { error }            once, on failure
+// Streams the oss-discover-agent turn live over SSE.
+// Event types sent:
+//   session  -> { sessionId }
+//   thinking -> { content }   reasoning_content deltas
+//   chunk    -> { content }   final-answer content deltas
+//   done     -> { repository, raw, parseFailed }
+//   error    -> { error }
 router.post("/discover", async (req: Request, res: Response) => {
-  const { stack, repos } = req.body;
+  const { developerProfile, sessionId: clientSessionId } = req.body as {
+    developerProfile: unknown;
+    sessionId?: string;
+  };
 
-  if (!stack) {
-    return res.status(400).json({ success: false, error: "stack is required" });
+  if (!developerProfile) {
+    return res
+      .status(400)
+      .json({ success: false, error: "developerProfile is required" });
   }
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -147,71 +84,63 @@ router.post("/discover", async (req: Request, res: Response) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  // If the client disconnects mid-stream, stop writing — nothing else to
-  // do here since the underlying agent turn has no cancel hook exposed.
   let clientGone = false;
   req.on("close", () => {
     clientGone = true;
   });
 
   try {
-    const session = await agentClient.createSession({
-      agentName: OSS_AGENT_NAME,
-    });
+    const session = clientSessionId
+      ? await agentClient.getSession({ sessionId: clientSessionId })
+      : await agentClient.createSession({ agentName: OSS_AGENT_NAME });
 
     if (clientGone) return;
     send("session", { sessionId: (session as any).id ?? null });
 
     const turn = session.prepareTurn({
       input: [
-        { type: "user.message", content: buildStackPrompt(stack, repos) },
+        { type: "user.message", content: buildProfilePrompt(developerProfile) },
       ],
     });
 
+    const events = new Map<string, TurnEvent>();
     let finalText = "";
-    for await (const data of turn.execute({ stream: true })) {
+
+    for await (const { event } of turn.execute({ stream: true })) {
       if (clientGone) return;
 
-      const chunk = extractText(data.event);
-      if (chunk) {
-        finalText += chunk;
-        send("chunk", { content: chunk });
+      if (isEventDelta(event)) {
+        const base = events.get(event.id);
+        if (base) mergeEventDelta(base, event);
+
+        if (
+          typeof event.reasoning_content === "string" &&
+          event.reasoning_content
+        ) {
+          send("thinking", { content: event.reasoning_content });
+        }
+        if (typeof event.content === "string" && event.content) {
+          finalText += event.content;
+          send("chunk", { content: event.content });
+        }
+      } else {
+        events.set(event.id, event);
       }
+
       if (DEBUG_AGENT_EVENTS) {
-        console.log(
-          `[agent event] ${data.event?.type}`,
-          JSON.stringify(data.event),
-        );
+        console.log(`[agent event] ${event.type}`, JSON.stringify(event));
       }
     }
 
     if (clientGone) return;
 
-    finalText = finalText.trim();
-    const { repositories, bestMatch } = parseRecommendations(finalText);
-
-    if (repositories.length === 0) {
-      // Parsing failed — the agent didn't follow the format exactly.
-      // Send the raw text through so the frontend can still show
-      // *something* instead of a blank screen, flagged for debugging.
-      console.warn(
-        "OSS discover: parsed 0 repositories from agent output, sending raw fallback",
-      );
-      send("done", {
-        repositories: [],
-        bestMatch: null,
-        raw: finalText,
-        parseFailed: true,
-      });
-      return res.end();
+    try {
+      const repository = parseRepository(finalText);
+      send("done", { repository, raw: finalText, parseFailed: false });
+    } catch (parseErr) {
+      console.warn("OSS discover: failed to parse repository JSON", parseErr);
+      send("done", { repository: null, raw: finalText, parseFailed: true });
     }
-
-    send("done", {
-      repositories,
-      bestMatch,
-      raw: finalText,
-      parseFailed: false,
-    });
     res.end();
   } catch (error: any) {
     console.error("OSS discover error:", error);

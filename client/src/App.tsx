@@ -6,6 +6,7 @@ import { fetchCurrentUser } from "./store/authSlice";
 import Landing from "./pages/Landing";
 import Analysis from "./pages/Analysis";
 import RepoDetailPage from "./pages/RepoDetailPage";
+import AgentPage from "./pages/AgentPage";
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
@@ -18,6 +19,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/analysis" element={<Analysis />} />
+      <Route path="/agent" element={<AgentPage />} />
       <Route path="/repo/:owner/:repo" element={<RepoDetailPage />} />
     </Routes>
   );

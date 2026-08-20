@@ -1,83 +1,67 @@
+// frontend/src/store/ossSlice.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import type { RootState } from "./store";
 
-export interface RepoRecommendation {
-  rank: number;
+export interface KeyComponent {
   name: string;
+  description: string;
+}
+
+export interface OssRepository {
+  owner: string;
+  name: string;
+  fullName: string;
   url: string;
   description: string;
+  primaryTechnology: string;
+  fitScore: number;
   whyItMatches: string;
-  matchingTechnologies: string[];
-  matchScore: number;
+  whatItDoes: string;
+  keyComponents: KeyComponent[];
+  recommendedStartingPoint: string;
+  difficulty: string;
 }
-
-export interface BestMatch {
-  name: string;
-  reason: string;
-}
-
-export type OssColumnId = "suggested" | "shortlisted" | "selected";
-
-export const OSS_COLUMNS: { id: OssColumnId; title: string; hint: string }[] = [
-  { id: "suggested", title: "Suggested", hint: "Agent recommendations" },
-  { id: "shortlisted", title: "Shortlisted", hint: "Worth a closer look" },
-  { id: "selected", title: "Selected", hint: "Your pick" },
-];
 
 interface DiscoverResult {
-  repositories: RepoRecommendation[];
-  bestMatch: BestMatch | null;
+  repository: OssRepository | null;
   raw: string;
   parseFailed: boolean;
 }
 
 interface OssState {
-  repositories: RepoRecommendation[];
-  bestMatch: BestMatch | null;
-  selectedRepo: RepoRecommendation | null;
-  columns: Record<OssColumnId, string[]>; // repo.url[]
+  repository: OssRepository | null;
   parseFailed: boolean;
   raw: string | null;
-  liveOutput: string; // streamed text from the agent, accumulated live
+  thinking: string; // streamed reasoning_content, accumulated live
+  liveOutput: string; // streamed final-answer content, accumulated live
   sessionId: string | null;
   status: "idle" | "loading" | "succeeded" | "failed";
   error: string | null;
 }
 
-const emptyColumns: Record<OssColumnId, string[]> = {
-  suggested: [],
-  shortlisted: [],
-  selected: [],
-};
-
 const initialState: OssState = {
-  repositories: [],
-  bestMatch: null,
-  selectedRepo: null,
-  columns: emptyColumns,
+  repository: null,
   parseFailed: false,
   raw: null,
+  thinking: "",
   liveOutput: "",
   sessionId: null,
   status: "idle",
   error: null,
 };
 
-// Reads the /api/oss/discover SSE stream and dispatches liveOutput/session
-// updates as they arrive, resolving once the "done" event lands (or
-// rejecting on "error" / a network failure / a stream that never sends
-// "done").
-export const findOssProjects = createAsyncThunk<
+export const findOssRepository = createAsyncThunk<
   DiscoverResult,
   void,
   { state: RootState; rejectValue: string }
 >("oss/discover", async (_, { getState, dispatch, rejectWithValue }) => {
   const state = getState();
-  const { stack, repos } = state.github;
+  const { profile } = state.devProfile;
+  const { sessionId } = state.oss;
 
-  if (!stack) {
-    return rejectWithValue("GitHub stack not loaded yet");
+  if (!profile) {
+    return rejectWithValue("Developer profile not loaded yet");
   }
 
   let res: Response;
@@ -88,7 +72,7 @@ export const findOssProjects = createAsyncThunk<
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ stack, repos }),
+        body: JSON.stringify({ developerProfile: profile, sessionId }),
       },
     );
   } catch {
@@ -121,6 +105,8 @@ export const findOssProjects = createAsyncThunk<
 
     if (event === "session") {
       dispatch(streamSession(data.sessionId ?? null));
+    } else if (event === "thinking") {
+      dispatch(streamThinking(data.content ?? ""));
     } else if (event === "chunk") {
       dispatch(streamChunk(data.content ?? ""));
     } else if (event === "error") {
@@ -146,7 +132,6 @@ export const findOssProjects = createAsyncThunk<
     for (const rawEvent of events) handleEvent(rawEvent);
   }
 
-  // Flush any trailing event left in the buffer without a final \n\n.
   if (buffer.trim()) handleEvent(buffer);
 
   if (streamError) return rejectWithValue(streamError);
@@ -159,40 +144,20 @@ const ossSlice = createSlice({
   initialState,
   reducers: {
     resetOssRecommendation: (state) => {
-      state.repositories = [];
-      state.bestMatch = null;
-      state.selectedRepo = null;
-      state.columns = emptyColumns;
+      state.repository = null;
       state.parseFailed = false;
       state.raw = null;
+      state.thinking = "";
       state.liveOutput = "";
       state.sessionId = null;
       state.status = "idle";
       state.error = null;
     },
-    selectRepository: (state, action: { payload: RepoRecommendation }) => {
-      state.selectedRepo = action.payload;
-    },
-    clearSelectedRepository: (state) => {
-      state.selectedRepo = null;
-    },
-    moveRepoToColumn: (
-      state,
-      action: { payload: { repoUrl: string; toColumn: OssColumnId } },
-    ) => {
-      const { repoUrl, toColumn } = action.payload;
-      (Object.keys(state.columns) as OssColumnId[]).forEach((col) => {
-        state.columns[col] = state.columns[col].filter((u) => u !== repoUrl);
-      });
-      state.columns[toColumn].push(repoUrl);
-
-      if (toColumn === "selected") {
-        const repo = state.repositories.find((r) => r.url === repoUrl);
-        if (repo) state.selectedRepo = repo;
-      }
-    },
     streamSession: (state, action: { payload: string | null }) => {
       state.sessionId = action.payload;
+    },
+    streamThinking: (state, action: { payload: string }) => {
+      state.thinking += action.payload;
     },
     streamChunk: (state, action: { payload: string }) => {
       state.liveOutput += action.payload;
@@ -200,26 +165,20 @@ const ossSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(findOssProjects.pending, (state) => {
+      .addCase(findOssRepository.pending, (state) => {
         state.status = "loading";
         state.error = null;
-        state.selectedRepo = null;
+        state.repository = null;
+        state.thinking = "";
         state.liveOutput = "";
-        state.sessionId = null;
       })
-      .addCase(findOssProjects.fulfilled, (state, action) => {
+      .addCase(findOssRepository.fulfilled, (state, action) => {
         state.status = "succeeded";
-        state.repositories = action.payload.repositories;
-        state.bestMatch = action.payload.bestMatch;
+        state.repository = action.payload.repository;
         state.raw = action.payload.raw;
         state.parseFailed = action.payload.parseFailed;
-        state.columns = {
-          suggested: action.payload.repositories.map((r) => r.url),
-          shortlisted: [],
-          selected: [],
-        };
       })
-      .addCase(findOssProjects.rejected, (state, action) => {
+      .addCase(findOssRepository.rejected, (state, action) => {
         state.status = "failed";
         state.error = action.payload as string;
       });
@@ -228,10 +187,8 @@ const ossSlice = createSlice({
 
 export const {
   resetOssRecommendation,
-  selectRepository,
-  clearSelectedRepository,
-  moveRepoToColumn,
   streamSession,
+  streamThinking,
   streamChunk,
 } = ossSlice.actions;
 export default ossSlice.reducer;
