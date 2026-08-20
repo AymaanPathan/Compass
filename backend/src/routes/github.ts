@@ -1,10 +1,94 @@
 import { Router, Response } from "express";
-import axios from "axios";
 import User from "../models/User";
 import { requireAuth, AuthRequest } from "../middleware/auth";
-import { githubClient } from "../utils/githubClient";
+import { agentClient, DEV_PROFILE_AGENT_NAME } from "../services/agentClient";
+import { fetchGithubStackData } from "../utils/githubData";
+import { withAgentRetry } from "../utils/retryAgentTurn";
 
+const DEBUG_AGENT_EVENTS = process.env.DEBUG_AGENT_EVENTS === "true";
 const router = Router();
+
+interface TechConfidence {
+  name: string;
+  confidence: number;
+}
+
+export interface DeveloperProfile {
+  builderArchetype: string;
+  developerType: string;
+  summary: string;
+  githubVibe: string;
+  experienceLevel:
+    | "Beginner"
+    | "Early Intermediate"
+    | "Intermediate"
+    | "Advanced";
+  strongestTechnologies: TechConfidence[];
+  strengths: string[];
+  engineeringPatterns: string[];
+  contributionAreas: string[];
+  funInsights: string[];
+}
+
+function extractText(event: any): string | null {
+  if (!event) return null;
+  if (
+    (event.type === "model.message.delta" || event.type === "model.message") &&
+    typeof event.content === "string" &&
+    event.content.length > 0
+  ) {
+    return event.content;
+  }
+  return null;
+}
+
+function parseProfileResponse(text: string): DeveloperProfile | null {
+  try {
+    const cleaned = text.trim().replace(/^```json\s*|\s*```$/g, "");
+    const parsed = JSON.parse(cleaned);
+    if (
+      !parsed.builderArchetype ||
+      !Array.isArray(parsed.strongestTechnologies)
+    ) {
+      return null;
+    }
+    return parsed as DeveloperProfile;
+  } catch {
+    return null;
+  }
+}
+
+async function runProfileAgent(prompt: string): Promise<string> {
+  return withAgentRetry(async () => {
+    const session = await agentClient.createSession({
+      agentName: DEV_PROFILE_AGENT_NAME,
+    });
+
+    const turn = session.prepareTurn({
+      input: [{ type: "user.message", content: prompt }],
+    });
+
+    let finalText = "";
+    for await (const data of turn.execute({ stream: true })) {
+      const chunk = extractText(data.event);
+      if (chunk) finalText += chunk;
+      if (DEBUG_AGENT_EVENTS) {
+        console.log(
+          `[profile agent event] ${data.event?.type}`,
+          JSON.stringify(data.event),
+        );
+      }
+      if (
+        data.event?.type === "turn.done" &&
+        data.event?.state?.status === "error"
+      ) {
+        throw new Error(data.event.state.message || "Agent turn failed");
+      }
+    }
+
+    return finalText.trim();
+  });
+}
 
 router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -13,79 +97,35 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, error: "User not found" });
     }
 
-    const gh = githubClient(user.accessToken);
+    const stackData = await fetchGithubStackData(user.accessToken);
 
-    const profileRes = await gh.get("/user");
+    const finalText = await runProfileAgent(JSON.stringify(stackData));
+    const profile = parseProfileResponse(finalText);
 
-    const reposRes = await gh.get(
-      "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator",
-    );
+    if (!profile) {
+      console.warn(
+        "Developer profile agent: failed to parse JSON, returning raw fallback",
+      );
+      return res.json({
+        success: true,
+        profile: null,
+        raw: finalText,
+        parseFailed: true,
+      });
+    }
 
-    const repos = reposRes.data;
-
-    // language breakdown across repos (cheap version: repo.language field, not per-repo language stats API)
-    const languageCounts: Record<string, number> = {};
-    repos.forEach((repo: any) => {
-      if (repo.language) {
-        languageCounts[repo.language] =
-          (languageCounts[repo.language] || 0) + 1;
-      }
-    });
-
-    const topLanguages = Object.entries(languageCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([lang, count]) => ({ language: lang, repoCount: count }));
-
-    const totalStars = repos.reduce(
-      (sum: number, r: any) => sum + r.stargazers_count,
-      0,
-    );
-    const originalRepos = repos.filter((r: any) => !r.fork);
-
-    const profile = profileRes.data;
-
-    res.json({
+    return res.json({
       success: true,
-      profile: {
-        githubId: String(profile.id),
-        username: profile.login,
-        displayName: profile.name,
-        avatarUrl: profile.avatar_url,
-        bio: profile.bio,
-        company: profile.company,
-        location: profile.location,
-        publicRepos: profile.public_repos,
-        followers: profile.followers,
-        following: profile.following,
-        createdAt: profile.created_at,
-      },
-      stack: {
-        topLanguages,
-        totalRepos: repos.length,
-        originalRepos: originalRepos.length,
-        forkedRepos: repos.length - originalRepos.length,
-        totalStars,
-      },
-      repos: repos.slice(0, 20).map((r: any) => ({
-        name: r.name,
-        fullName: r.full_name,
-        description: r.description,
-        language: r.language,
-        stars: r.stargazers_count,
-        forks: r.forks_count,
-        isFork: r.fork,
-        updatedAt: r.updated_at,
-        url: r.html_url,
-      })),
+      profile,
+      raw: finalText,
+      parseFailed: false,
     });
   } catch (error: any) {
     console.error(
-      "GitHub profile fetch error:",
+      "Developer profile fetch error:",
       error.response?.data || error.message,
     );
 
-    // access token expired/revoked
     if (error.response?.status === 401) {
       return res.status(401).json({
         success: false,
@@ -95,7 +135,7 @@ router.get("/profile", requireAuth, async (req: AuthRequest, res: Response) => {
 
     res
       .status(500)
-      .json({ success: false, error: "Failed to fetch GitHub profile" });
+      .json({ success: false, error: "Failed to analyze GitHub profile" });
   }
 });
 
