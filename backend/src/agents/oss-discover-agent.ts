@@ -12,7 +12,7 @@ async function createAgent() {
       model: {
         name: "gemma-4-31b/gemma-4-31b",
         params: {
-          max_tokens: 500,
+          max_tokens: 1000,
         },
       },
 
@@ -124,7 +124,7 @@ FINAL RULES:
         {
           name: "github",
           enableTools: ["search_repositories"],
-          preload: false,
+          preload: true,
           preloadTools: ["search_repositories"],
         },
       ],
