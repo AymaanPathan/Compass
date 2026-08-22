@@ -12,7 +12,7 @@ async function createDeveloperProfileAgent() {
       manifest: {
         model: {
           // provider-name/model-id
-          name: "gemma-4-31b/gemma-4-31b",
+          name: "gpt-oss-120b",
 
           params: {
             max_tokens: 6000,

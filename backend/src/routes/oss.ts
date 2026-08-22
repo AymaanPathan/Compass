@@ -22,21 +22,25 @@ export interface OssRepository {
   difficulty: "intermediate";
 }
 
-function parseRepository(text: string): OssRepository | null {
-  const cleaned = text
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
+function parseRepository(output: string) {
+  try {
+    // Remove markdown code fences if the model returns them
+    const cleaned = output
+      .trim()
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
 
-  const parsed = JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
 
-  if (!parsed.repository) {
+    return parsed.repository ?? parsed;
+  } catch (error) {
+    console.error("[oss/discover] failed to parse repository:", error);
+    console.error("[oss/discover] raw output:", output);
+
     return null;
   }
-
-  return parsed.repository;
 }
 
 router.post("/discover", async (req: Request, res: Response) => {
@@ -109,6 +113,17 @@ Return the JSON exactly as instructed.
     console.log(finalOutput);
 
     const repository = parseRepository(finalOutput);
+
+    if (!repository) {
+      console.warn("[oss/discover] agent returned invalid repository data");
+
+      return res.status(502).json({
+        success: false,
+        error: "Repository discovery agent returned an invalid response",
+        raw: finalOutput,
+        sessionId: session.id,
+      });
+    }
 
     return res.json({
       success: true,
