@@ -1,5 +1,5 @@
-const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_BASE_DELAY_MS = 800;
+const DEFAULT_MAX_ATTEMPTS = 2;
+const DEFAULT_BASE_DELAY_MS = 1500;
 
 interface RetryOptions {
   maxAttempts?: number;
@@ -30,6 +30,14 @@ function delay(ms: number): Promise<void> {
  * error that looks retryable (rate limits, timeouts, transient
  * connection errors, or an explicit agent-turn failure). Non-retryable
  * errors are rethrown immediately.
+ *
+ * NOTE: LLM provider rate limits are typically per-minute (a 429 here
+ * commonly comes back with `retry-after: 50-60s`). Retrying a handful of
+ * times with short backoffs inside a single HTTP request cannot outrun
+ * that — it just guarantees repeated failure while the caller waits.
+ * Keep `maxAttempts` low here; the real fix for rate-limit pressure is
+ * reducing request volume upstream (de-duping concurrent requests,
+ * caching recent results), not retrying harder.
  */
 export async function withAgentRetry<T>(
   fn: () => Promise<T>,

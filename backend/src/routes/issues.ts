@@ -15,6 +15,52 @@ export interface GithubIssue {
   createdAt: string;
 }
 
+interface IssuesResult {
+  repository: string;
+  issues: GithubIssue[];
+}
+
+// ---------------------------------------------------------------------------
+// In-flight de-dupe + short-lived success cache.
+//
+// Two problems this solves:
+// 1. React StrictMode (and any accidental double-mount/double-click on the
+//    frontend) can fire two requests for the same repo within milliseconds.
+//    Without de-duping, that's two full agent sessions hitting the LLM
+//    provider's per-minute rate limit at once — exactly what caused the
+//    429s in the logs.
+// 2. Repeatedly opening the same repo's detail page shouldn't re-run the
+//    agent every time. A short TTL cache means a second visit within a few
+//    minutes is instant and costs zero agent calls.
+// ---------------------------------------------------------------------------
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+const inFlightRequests = new Map<string, Promise<IssuesResult>>();
+const resultCache = new Map<
+  string,
+  { result: IssuesResult; expiresAt: number }
+>();
+
+function getCached(repoFullName: string): IssuesResult | null {
+  const entry = resultCache.get(repoFullName);
+  if (!entry) return null;
+
+  if (Date.now() > entry.expiresAt) {
+    resultCache.delete(repoFullName);
+    return null;
+  }
+
+  return entry.result;
+}
+
+function setCached(repoFullName: string, result: IssuesResult) {
+  resultCache.set(repoFullName, {
+    result,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
 /**
  * Extracts the first balanced {...} block from a string. Protects
  * against trailing commentary or explanatory text the model sometimes
@@ -68,9 +114,7 @@ function stripMarkdownFences(input: string): string {
     .trim();
 }
 
-function parseIssuesResponse(
-  text: string,
-): { repository: string; issues: GithubIssue[] } | null {
+function parseIssuesResponse(text: string): IssuesResult | null {
   try {
     const cleaned = stripMarkdownFences(text);
     const jsonStr = extractBalancedJson(cleaned);
@@ -84,8 +128,19 @@ function parseIssuesResponse(
 
     const parsed = JSON.parse(jsonStr);
 
+    // The model can legitimately return {} when the underlying tool
+    // response was too large to work with. Treat that as "zero issues
+    // found" rather than a hard parse failure, so the user sees an empty
+    // state instead of an error.
+    if (!("issues" in parsed)) {
+      console.warn(
+        "[issues/fetch] response had no issues array (likely a truncated tool result) — treating as empty",
+      );
+      return { repository: String(parsed.repository || ""), issues: [] };
+    }
+
     if (!Array.isArray(parsed.issues)) {
-      console.error("[issues/fetch] response missing an issues array");
+      console.error("[issues/fetch] issues field is not an array");
       return null;
     }
 
@@ -115,51 +170,110 @@ function parseIssuesResponse(
   }
 }
 
+function isRateLimitError(error: any): boolean {
+  return String(error?.message || error || "").includes("429");
+}
+
 async function runIssuesAgent(prompt: string): Promise<string> {
-  return withAgentRetry(async () => {
-    const { data: session } = await agentClient.sessions.create({
-      agent: { name: OSS_ISSUES_AGENT_NAME },
-    });
+  return withAgentRetry(
+    async () => {
+      const { data: session } = await agentClient.sessions.create({
+        agent: { name: OSS_ISSUES_AGENT_NAME },
+      });
 
-    const stream = await agentClient.sessions.createTurnStream(session.id, {
-      input: [{ type: "user.message", content: prompt }],
-    });
+      const stream = await agentClient.sessions.createTurnStream(session.id, {
+        input: [{ type: "user.message", content: prompt }],
+      });
 
-    let finalText = "";
+      let finalText = "";
 
-    for await (const { data: event } of stream.withMetadata()) {
-      if (DEBUG_AGENT_EVENTS) {
-        console.log(
-          `[issues agent event] ${event?.type}`,
-          JSON.stringify(event),
-        );
-      }
-
-      if (event.type === "model.message.delta" && event.threadId === "main") {
-        finalText += event.content ?? "";
-      }
-
-      if (event.type === "turn.done") {
-        if (event.state?.status === "error") {
-          throw new Error((event.state as any)?.message || "Agent turn failed");
+      for await (const { data: event } of stream.withMetadata()) {
+        if (DEBUG_AGENT_EVENTS) {
+          console.log(
+            `[issues agent event] ${event?.type}`,
+            JSON.stringify(event),
+          );
         }
 
-        if (event.state?.status === "done" && event.state?.output?.content) {
-          const content = event.state.output.content;
+        if (event.type === "model.message.delta" && event.threadId === "main") {
+          finalText += event.content ?? "";
+        }
 
-          finalText =
-            typeof content === "string"
-              ? content
-              : content
-                  .filter((item: any) => item.type === "text")
-                  .map((item: any) => item.text)
-                  .join("");
+        if (event.type === "turn.done") {
+          if (event.state?.status === "error") {
+            throw new Error(
+              (event.state as any)?.message || "Agent turn failed",
+            );
+          }
+
+          if (event.state?.status === "done" && event.state?.output?.content) {
+            const content = event.state.output.content;
+
+            finalText =
+              typeof content === "string"
+                ? content
+                : content
+                    .filter((item: any) => item.type === "text")
+                    .map((item: any) => item.text)
+                    .join("");
+          }
         }
       }
+
+      return finalText.trim();
+    },
+    // The provider's rate limit is per-minute (retry-after ~50-60s in the
+    // logs) — burning through several fast retries inside one HTTP request
+    // just wastes time and still fails. Fail fast instead; the in-flight
+    // de-dupe + cache above do the real work of keeping request volume down.
+    { maxAttempts: 2, baseDelayMs: 1500 },
+  );
+}
+
+async function getIssuesForRepo(repoFullName: string): Promise<IssuesResult> {
+  const cached = getCached(repoFullName);
+  if (cached) {
+    console.log(`[issues/fetch] cache hit for ${repoFullName}`);
+    return cached;
+  }
+
+  const inFlight = inFlightRequests.get(repoFullName);
+  if (inFlight) {
+    console.log(`[issues/fetch] joining in-flight request for ${repoFullName}`);
+    return inFlight;
+  }
+
+  const promise = (async () => {
+    console.log("[issues/fetch] running agent for", repoFullName);
+
+    const prompt = `Repository: ${repoFullName}`;
+    const finalText = await runIssuesAgent(prompt);
+    const parsed = parseIssuesResponse(finalText);
+
+    if (!parsed) {
+      const err: any = new Error(
+        "Issue discovery agent returned an invalid response",
+      );
+      err.raw = finalText;
+      throw err;
     }
 
-    return finalText.trim();
-  });
+    const result: IssuesResult = {
+      repository: parsed.repository || repoFullName,
+      issues: parsed.issues,
+    };
+
+    setCached(repoFullName, result);
+    return result;
+  })();
+
+  inFlightRequests.set(repoFullName, promise);
+
+  try {
+    return await promise;
+  } finally {
+    inFlightRequests.delete(repoFullName);
+  }
 }
 
 router.post("/fetch", async (req: Request, res: Response) => {
@@ -173,33 +287,28 @@ router.post("/fetch", async (req: Request, res: Response) => {
       });
     }
 
-    console.log("[issues/fetch] running agent for", repoFullName);
-
-    const prompt = `Repository: ${repoFullName}`;
-    const finalText = await runIssuesAgent(prompt);
-    const parsed = parseIssuesResponse(finalText);
-
-    if (!parsed) {
-      console.warn("[issues/fetch] agent returned invalid issue data");
-
-      return res.status(502).json({
-        success: false,
-        error: "Issue discovery agent returned an invalid response",
-        raw: finalText,
-      });
-    }
+    const result = await getIssuesForRepo(repoFullName);
 
     return res.json({
       success: true,
-      repository: parsed.repository || repoFullName,
-      issues: parsed.issues,
+      repository: result.repository,
+      issues: result.issues,
     });
   } catch (error: any) {
     console.error("[issues/fetch] error:", error);
 
-    return res.status(500).json({
+    if (isRateLimitError(error)) {
+      return res.status(429).json({
+        success: false,
+        error:
+          "The issue-discovery agent is rate-limited right now. Please wait about a minute and try again.",
+      });
+    }
+
+    return res.status(502).json({
       success: false,
       error: error.message || "Failed to fetch issues",
+      raw: error.raw,
     });
   }
 });

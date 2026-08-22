@@ -29,7 +29,7 @@ AVAILABLE TOOLS:
 
 REQUIRED TOOL SEQUENCE:
 
-1. Call list_issues exactly once, with owner, repo, perPage=8, state="open".
+1. Call list_issues exactly once, with owner, repo, perPage=5, state="open".
 2. After that tool call, immediately return the final JSON.
 
 HARD RULES:
@@ -40,11 +40,18 @@ HARD RULES:
 - Do not perform additional verification.
 - Do not make any tool call after list_issues.
 
-Return between 5 and 8 issues. If fewer than 5 open issues exist, return
+Return between 3 and 5 issues. If fewer than 3 open issues exist, return
 as many as are available.
 
 Never invent issues, titles, authors, labels, or URLs. Only use data
 returned by list_issues.
+
+If the tool result is truncated, too large to read, or otherwise
+unusable, do NOT give up and return an empty object. Instead, extract
+whatever individual issues you CAN read from the partial/preview data
+(number, title, url, author, labels, createdAt if present) and return
+those. If literally no issue could be read, return the repository field
+with an empty issues array — never return just "{}".
 
 Return exactly:
 
@@ -65,6 +72,7 @@ Return exactly:
 
 FINAL RULES:
 
+- Always include the "repository" field, even if issues is empty.
 - Never add extra fields.
 - Never output markdown.
 - Never ask questions.

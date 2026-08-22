@@ -56,6 +56,11 @@ function AgentPage() {
     dispatch(findOssRepository());
   };
 
+  const handleViewIssues = () => {
+    if (!repository) return;
+    navigate(`/repo/${repository.owner}/${repository.name}`);
+  };
+
   return (
     <div className="min-h-screen bg-black text-white">
       <header className="mx-auto flex w-full max-w-4xl items-center justify-between border-b border-white/[0.06] px-6 py-6">
@@ -261,14 +266,23 @@ function AgentPage() {
                     {repository.difficulty}
                   </div>
 
-                  <a
-                    href={repository.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-neutral-200"
-                  >
-                    Explore repository →
-                  </a>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handleViewIssues}
+                      className="rounded-lg border border-white/10 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-white/5"
+                    >
+                      View open issues →
+                    </button>
+
+                    <a
+                      href={repository.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-neutral-200"
+                    >
+                      Explore repository →
+                    </a>
+                  </div>
                 </div>
               </div>
 

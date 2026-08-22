@@ -1,38 +1,45 @@
-import { useSelector } from "react-redux";
-import type { RootState } from "../store/store";
+import { useDispatch, useSelector } from "react-redux";
+import type { AppDispatch, RootState } from "../store/store";
+import { fetchIssuesForRepo } from "../store/issuesSlice";
 import IssueCard from "./IssueCard";
 
-function IssuesPanel() {
+interface IssuesPanelProps {
+  repoFullName: string;
+}
+
+function IssuesPanel({ repoFullName }: IssuesPanelProps) {
+  const dispatch = useDispatch<AppDispatch>();
   const { issues, status, error } = useSelector(
     (state: RootState) => state.issues,
   );
 
-  if (status === "loading") {
-    return (
-      <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 py-12">
-        <div className="h-3 w-3 rounded-full border-2 border-neutral-700 border-t-white animate-spin" />
-        Fetching issues…
-      </div>
-    );
-  }
-
-  if (status === "failed") {
-    return <p className="text-xs text-red-400 py-4">{error}</p>;
-  }
-
-  if (issues.length === 0) {
-    return (
-      <p className="text-xs text-neutral-600 py-8 text-center">
-        No open issues found for this repository.
-      </p>
-    );
-  }
+  const handleFindIssues = () => {
+    dispatch(fetchIssuesForRepo(repoFullName));
+  };
 
   return (
-    <div className="flex flex-col gap-2">
-      {issues.map((issue) => (
-        <IssueCard key={issue.number} issue={issue} />
-      ))}
+    <div>
+      <button
+        onClick={handleFindIssues}
+        disabled={status === "loading"}
+        className="text-xs px-4 py-2 rounded-md bg-white text-black font-medium hover:bg-neutral-200 transition-colors disabled:opacity-50"
+      >
+        {status === "loading" ? "Finding issues..." : "Find Issues"}
+      </button>
+
+      {status === "failed" && (
+        <p className="text-xs text-red-400 mt-3">{error}</p>
+      )}
+
+      {status === "succeeded" && issues.length === 0 && (
+        <p className="text-xs text-neutral-600 mt-3">No open issues found.</p>
+      )}
+
+      <div className="flex flex-col gap-2 mt-3">
+        {issues.map((issue) => (
+          <IssueCard key={issue.number} issue={issue} />
+        ))}
+      </div>
     </div>
   );
 }
