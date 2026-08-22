@@ -1,42 +1,65 @@
-function sleep(ms: number) {
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_BASE_DELAY_MS = 800;
+
+interface RetryOptions {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+}
+
+function isRetryableError(error: any): boolean {
+  const message = String(error?.message || error || "").toLowerCase();
+
+  return (
+    message.includes("429") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("agent turn failed")
+  );
+}
+
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRateLimitError(err: any): boolean {
-  const status = err?.status || err?.response?.status;
-  const message = String(err?.message || "");
-  return status === 429 || message.includes("429");
-}
-
 /**
- * Runs an agent turn with retry-on-429 and exponential backoff.
- * fn should perform the full session.createSession + turn.execute + text
- * accumulation, and either return the accumulated text or throw.
+ * Runs `fn` and retries it with exponential backoff if it throws an
+ * error that looks retryable (rate limits, timeouts, transient
+ * connection errors, or an explicit agent-turn failure). Non-retryable
+ * errors are rethrown immediately.
  */
 export async function withAgentRetry<T>(
   fn: () => Promise<T>,
-  {
-    retries = 2,
-    baseDelayMs = 1200,
-  }: { retries?: number; baseDelayMs?: number } = {},
+  options?: RetryOptions,
 ): Promise<T> {
-  let lastErr: any;
+  const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const baseDelayMs = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await fn();
-    } catch (err: any) {
-      lastErr = err;
-      if (!isRateLimitError(err) || attempt === retries) {
-        throw err;
+    } catch (error) {
+      lastError = error;
+      const isLastAttempt = attempt === maxAttempts;
+
+      if (isLastAttempt || !isRetryableError(error)) {
+        throw error;
       }
-      const delay = baseDelayMs * Math.pow(2, attempt);
+
+      const backoffMs = baseDelayMs * Math.pow(2, attempt - 1);
       console.warn(
-        `Agent call rate limited (429), retrying in ${delay}ms (attempt ${attempt + 1}/${retries})`,
+        `[withAgentRetry] attempt ${attempt}/${maxAttempts} failed (${
+          (error as Error)?.message
+        }), retrying in ${backoffMs}ms`,
       );
-      await sleep(delay);
+      await delay(backoffMs);
     }
   }
 
-  throw lastErr;
+  throw lastError;
 }
