@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { TrueForge } from "@truefoundry/trueforge-sdk";
+import { withAgentRetry } from "../utils/retryAgentTurn";
 
 const router = Router();
 
@@ -33,6 +34,12 @@ const REQUIRED_FIELDS: (keyof OssRepository)[] = [
   "whyItMatches",
   "difficulty",
 ];
+
+interface ParseResult {
+  repository: OssRepository | null;
+  /** Populated when parsing/validation failed, used to build a targeted repair prompt */
+  failureReason: string | null;
+}
 
 /**
  * Extracts the first balanced {...} block from a string, starting at the
@@ -91,25 +98,34 @@ function stripMarkdownFences(input: string): string {
 
 /**
  * Validates that a parsed object looks like a usable OssRepository.
- * Returns null (not throw) so callers can decide whether to retry.
+ * Returns { repository: null, failureReason } instead of throwing, so
+ * callers can decide whether to retry and can build a targeted repair
+ * prompt from failureReason.
  */
-function validateRepository(candidate: any): OssRepository | null {
-  if (!candidate || typeof candidate !== "object") return null;
+function validateRepository(candidate: any): {
+  repository: OssRepository | null;
+  failureReason: string | null;
+} {
+  if (!candidate || typeof candidate !== "object") {
+    return {
+      repository: null,
+      failureReason: "the repository value was not an object",
+    };
+  }
 
-  for (const field of REQUIRED_FIELDS) {
-    if (!(field in candidate)) {
-      console.warn(
-        `[oss/discover] missing field "${field}" in repository object`,
-      );
-      return null;
-    }
+  const missing = REQUIRED_FIELDS.filter((field) => !(field in candidate));
+  if (missing.length > 0) {
+    const reason = `missing required field(s): ${missing.join(", ")}`;
+    console.warn(`[oss/discover] ${reason}`);
+    return { repository: null, failureReason: reason };
   }
 
   if (typeof candidate.fitScore !== "number") {
     const coerced = Number(candidate.fitScore);
     if (Number.isNaN(coerced)) {
-      console.warn("[oss/discover] fitScore is not a valid number");
-      return null;
+      const reason = `"fitScore" is not a valid number (got: ${JSON.stringify(candidate.fitScore)})`;
+      console.warn(`[oss/discover] ${reason}`);
+      return { repository: null, failureReason: reason };
     }
     candidate.fitScore = coerced;
   }
@@ -121,14 +137,13 @@ function validateRepository(candidate: any): OssRepository | null {
       .trim()
       .toLowerCase();
     if (suspiciousValues.includes(value)) {
-      console.warn(
-        `[oss/discover] field "${field}" looks like a placeholder: "${candidate[field]}"`,
-      );
-      return null;
+      const reason = `field "${field}" looks like a placeholder value: "${candidate[field]}"`;
+      console.warn(`[oss/discover] ${reason}`);
+      return { repository: null, failureReason: reason };
     }
   }
 
-  return candidate as OssRepository;
+  return { repository: candidate as OssRepository, failureReason: null };
 }
 
 /**
@@ -136,16 +151,16 @@ function validateRepository(candidate: any): OssRepository | null {
  * cannot be recovered. Handles markdown fences, trailing junk, an
  * explicit `{"repository": null}` response, and truncated output.
  */
-function parseRepository(output: string): OssRepository | null {
+function parseRepository(output: string): ParseResult {
   try {
     const cleaned = stripMarkdownFences(output);
     const jsonStr = extractBalancedJson(cleaned);
 
     if (!jsonStr) {
-      console.error(
-        "[oss/discover] no balanced JSON object found (output may be truncated)",
-      );
-      return null;
+      const reason =
+        "no balanced JSON object found in the output (it may have been truncated or repeated garbage tokens)";
+      console.error(`[oss/discover] ${reason}`);
+      return { repository: null, failureReason: reason };
     }
 
     const parsed = JSON.parse(jsonStr);
@@ -157,14 +172,15 @@ function parseRepository(output: string): OssRepository | null {
       console.log(
         "[oss/discover] agent explicitly returned no matching repository",
       );
-      return null;
+      return { repository: null, failureReason: null };
     }
 
     return validateRepository(candidate);
   } catch (error) {
-    console.error("[oss/discover] failed to parse repository:", error);
+    const reason = `JSON.parse failed: ${(error as Error)?.message}`;
+    console.error(`[oss/discover] failed to parse repository: ${reason}`);
     console.error("[oss/discover] raw output:", output);
-    return null;
+    return { repository: null, failureReason: reason };
   }
 }
 
@@ -213,7 +229,35 @@ async function runAgentTurn(
   return finalOutput;
 }
 
+/** Builds a repair prompt that tells the model exactly what went wrong last time. */
+function buildRepairPrompt(failureReason: string | null): string {
+  const reasonLine = failureReason
+    ? `Specifically: ${failureReason}.`
+    : "The response could not be parsed as valid JSON.";
+
+  return `
+Your previous response was invalid. ${reasonLine}
+
+You already called search_repositories earlier in this session — use those
+results. Do NOT call search_repositories again.
+
+Pick ONE repository from the results you already have and return every
+field below filled in with real, non-empty values (never "...", "string",
+or an empty object):
+
+{"repository":{"owner":"...","name":"...","fullName":"owner/name","url":"...","description":"...","primaryTechnology":"...","fitScore":0,"whyItMatches":"...","difficulty":"intermediate"}}
+
+If genuinely no repository from your search results qualifies, return
+exactly {"repository":null} instead.
+
+No markdown, no commentary, no explanation. JSON only.
+`;
+}
+
 router.post("/discover", async (req: Request, res: Response) => {
+  let sessionId: string | undefined;
+  let finalOutput = "";
+
   try {
     const { developerProfile } = req.body;
 
@@ -226,12 +270,13 @@ router.post("/discover", async (req: Request, res: Response) => {
 
     console.log("[oss/discover] creating agent session");
 
-    const { data: session } = await client.sessions.create({
-      agent: {
-        name: OSS_AGENT_NAME,
-      },
-    });
+    const { data: session } = await withAgentRetry(() =>
+      client.sessions.create({
+        agent: { name: OSS_AGENT_NAME },
+      }),
+    );
 
+    sessionId = session.id;
     console.log("[oss/discover] session:", session.id);
 
     const prompt = `
@@ -246,45 +291,52 @@ Return the JSON exactly as instructed.
 
     console.log("[oss/discover] running agent");
 
-    let finalOutput = await runAgentTurn(session.id, prompt);
+    finalOutput = await withAgentRetry(() => runAgentTurn(session.id, prompt));
     console.log("[oss/discover] final output (attempt 1):");
     console.log(finalOutput);
 
-    let repository = parseRepository(finalOutput);
+    let { repository, failureReason } = parseRepository(finalOutput);
 
-    // One repair attempt: ask the same session to fix its own malformed output
-    if (!repository) {
+    // One repair attempt: ask the same session to fix its own malformed output,
+    // telling it exactly what was wrong so it doesn't just resend {}
+    if (!repository && failureReason !== null) {
       console.warn(
-        "[oss/discover] first attempt failed, retrying with repair prompt",
+        `[oss/discover] first attempt failed (${failureReason}), retrying with repair prompt`,
       );
 
-      const repairPrompt = `
-Your previous response was not valid, complete JSON matching the required schema.
+      const repairPrompt = buildRepairPrompt(failureReason);
 
-Return ONLY the corrected JSON object for the repository. Use real values,
-not placeholders like "..." or "string". No markdown, no commentary.
-
-Required shape:
-{"repository":{"owner":"...","name":"...","fullName":"owner/name","url":"...","description":"...","primaryTechnology":"...","fitScore":0,"whyItMatches":"...","difficulty":"intermediate"}}
-
-Or, if no repository qualifies: {"repository":null}
-`;
-
-      finalOutput = await runAgentTurn(session.id, repairPrompt);
+      finalOutput = await withAgentRetry(() =>
+        runAgentTurn(session.id, repairPrompt),
+      );
       console.log("[oss/discover] final output (attempt 2 - repair):");
       console.log(finalOutput);
 
-      repository = parseRepository(finalOutput);
+      const repairResult = parseRepository(finalOutput);
+      repository = repairResult.repository;
+      failureReason = repairResult.failureReason;
+    }
+
+    // failureReason === null but repository === null means the agent
+    // legitimately found nothing — that's a valid, successful outcome.
+    if (!repository && failureReason === null) {
+      return res.json({
+        success: true,
+        repository: null,
+        raw: finalOutput,
+        sessionId: session.id,
+      });
     }
 
     if (!repository) {
       console.warn(
-        "[oss/discover] agent returned invalid repository data after retry",
+        `[oss/discover] agent returned invalid repository data after retry: ${failureReason}`,
       );
 
       return res.status(502).json({
         success: false,
         error: "Repository discovery agent returned an invalid response",
+        reason: failureReason,
         raw: finalOutput,
         sessionId: session.id,
       });
@@ -302,6 +354,7 @@ Or, if no repository qualifies: {"repository":null}
     return res.status(500).json({
       success: false,
       error: error.message || "Failed to discover repository",
+      sessionId,
     });
   }
 });

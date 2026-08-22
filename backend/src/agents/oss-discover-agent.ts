@@ -12,7 +12,8 @@ async function createAgent() {
       model: {
         name: "gemma-4-31b/gemma-4-31b",
         params: {
-          max_tokens: 1000,
+          max_tokens: 2000,
+          temperature: 0.3,
         },
       },
 
