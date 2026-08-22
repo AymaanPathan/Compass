@@ -1,3 +1,4 @@
+/* eslint-disable no-useless-assignment */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
@@ -132,26 +133,32 @@ export const fetchDeveloperProfile = createAsyncThunk<
 
       const dataLine = lines.find((line) => line.startsWith("data:"));
 
-      if (!eventLine || !dataLine) {
-        return;
-      }
-
-      const event = eventLine.replace("event:", "").trim();
-
+      let event = "done";
       let data: any;
 
       try {
-        data = JSON.parse(dataLine.replace("data:", "").trim());
+        // Normal SSE event
+        if (dataLine) {
+          event = eventLine
+            ? eventLine.replace("event:", "").trim()
+            : "message";
+
+          data = JSON.parse(dataLine.replace("data:", "").trim());
+        } else {
+          // Support raw JSON response
+          data = JSON.parse(rawEvent.trim());
+          event = "done";
+        }
       } catch {
         console.warn(
-          "[fetchDeveloperProfile] failed to parse SSE event:",
+          "[fetchDeveloperProfile] failed to parse event:",
           rawEvent,
         );
 
         return;
       }
 
-      console.log("[fetchDeveloperProfile] SSE event:", event, data);
+      console.log("[fetchDeveloperProfile] event:", event, data);
 
       if (event === "session") {
         dispatch(streamProfileSession(data.sessionId ?? null));
@@ -170,7 +177,14 @@ export const fetchDeveloperProfile = createAsyncThunk<
       }
 
       if (event === "done") {
-        result = data as ProfileResult;
+        // Handle backend response shape
+        result = {
+          profile: data.profile ?? null,
+          raw: data.raw ?? "",
+          parseFailed: data.parseFailed ?? false,
+          cached: data.cached,
+          generatedAt: data.generatedAt,
+        };
       }
     };
 
@@ -212,9 +226,13 @@ export const fetchDeveloperProfile = createAsyncThunk<
     if (streamError) {
       return rejectWithValue(streamError);
     }
-
     if (!result) {
-      return rejectWithValue("Developer profile stream ended without a result");
+      console.error("[fetchDeveloperProfile] stream ended without a result");
+      console.log("[fetchDeveloperProfile] last buffer:", buffer);
+
+      return rejectWithValue(
+        "Developer profile stream ended without a final result",
+      );
     }
 
     return result;
@@ -275,12 +293,16 @@ const devProfileSlice = createSlice({
       })
 
       .addCase(fetchDeveloperProfile.fulfilled, (state, action) => {
+        if (!action.payload) {
+          state.status = "failed";
+          state.error = "Developer profile returned no result";
+          return;
+        }
+
         state.status = "succeeded";
 
         state.profile = action.payload.profile;
-
         state.raw = action.payload.raw;
-
         state.parseFailed = action.payload.parseFailed;
       })
 
