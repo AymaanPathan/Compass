@@ -1,1 +1,1 @@
-TEST
+npx @truefoundry/trueforge
