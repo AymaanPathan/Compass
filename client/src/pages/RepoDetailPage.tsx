@@ -5,8 +5,6 @@ import type { AppDispatch, RootState } from "../store/store";
 import { resetIssues } from "../store/issuesSlice";
 import { resetInvestigation } from "../store/investigationSlice";
 import IssuesPanel from "../components/IssuesPanel";
-import InvestigationPanel from "../components/InvestigationPanel";
-import CodeViewerModal from "../components/CodeViewerModal";
 
 function RepoDetailPage() {
   const { owner, repo } = useParams<{ owner: string; repo: string }>();
@@ -108,11 +106,9 @@ function RepoDetailPage() {
             Open issues
           </h2>
           <IssuesPanel repoFullName={repoFullName} />
-          <InvestigationPanel />
         </section>
       </main>
 
-      <CodeViewerModal />
     </div>
   );
 }

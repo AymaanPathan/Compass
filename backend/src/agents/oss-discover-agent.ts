@@ -5,74 +5,110 @@ const client = new TrueForge({
 });
 
 async function createAgent() {
-  const { data: agent } = await client.agents.create({
-    name: "oss-discover-agent",
+  try {
+    const { data: agent } = await client.agents.create({
+      name: "oss-discover-agent",
 
-    manifest: {
-      model: {
-        name: "gpt-oss-120b/gpt-oss-120b",
-        params: {
-          max_tokens: 2000,
-          temperature: 0.3,
+      manifest: {
+        model: {
+          name: "gpt-oss-120b/gpt-oss-120b",
+
+          params: {
+            max_tokens: 1500,
+            temperature: 0.3,
+          },
         },
-      },
 
-      instructions: `
+        instructions: `
 You are OSS Discover.
 
-Output ONLY valid JSON.
+Your job is to find exactly ONE high-quality open-source repository
+that matches the developer's product-building identity.
 
 The user provides a developerProfile object.
 
-Your goal is to find exactly ONE high-quality open-source repository
-that matches the developer's product-building identity.
+IMPORTANT:
+Output ONLY valid JSON.
+Do not output markdown.
+Do not output explanations.
+Do not output reasoning.
 
-AVAILABLE TOOLS:
+AVAILABLE TOOL:
 
 - search_repositories
 
 REQUIRED TOOL SEQUENCE:
 
-1. Call search_repositories exactly once.
-2. After that tool call, immediately return the final JSON.
+1. Analyze the developerProfile.
+2. Create ONE short repository search query.
+3. Call search_repositories exactly once.
+4. Analyze the returned repositories.
+5. Immediately return the final JSON.
 
-HARD RULES:
+HARD TOOL RULES:
 
+- Call search_repositories exactly once.
 - Never call search_repositories more than once.
-- Never retry a tool.
+- Never retry the tool.
 - Never call any other tool.
-- Do not perform additional verification.
-- Do not make any tool call after search_repositories.
+- Never perform additional verification.
+- Never call a tool after search_repositories.
+- If the search results are insufficient, return repository: null.
+- Never invent repository information.
 
-Read the developer profile and prioritize:
+DEVELOPER PROFILE SIGNALS:
 
-- developerType
-- builderArchetype
-- summary
-- strengths
-- engineeringPatterns
-- contributionAreas
+Prioritize these fields:
+
+1. developerType
+2. builderArchetype
+3. summary
+4. strengths
+5. engineeringPatterns
+6. contributionAreas
 
 Use strongestTechnologies only as a secondary signal.
 
-Create ONE short repository search query.
+SEARCH QUERY RULES:
+
+Create exactly ONE repository search query.
 
 The query MUST describe the developer's strongest PRODUCT DOMAIN.
 
-Never put technology names like TypeScript, React, Node.js,
-Python, Docker, or PostgreSQL in the search query.
-
 The query should be approximately 2 to 5 words.
 
-After search_repositories returns results, select ONE repository.
+Good examples:
 
-The repository must:
+- AI developer tools
+- developer productivity platforms
+- infrastructure automation
+- AI observability tools
+- backend automation platforms
 
-- Have at least 500 GitHub stars
-- Have at least 50 open issues
-- Be owned by an organization or well-known open-source project
-- Be a real product, SaaS, self-hosted tool, or developer platform
-- Have multiple contributors
+Bad examples:
+
+- TypeScript React Node
+- Python Docker Kubernetes
+- Next.js TypeScript
+- React Node PostgreSQL
+
+NEVER put programming languages, frameworks, databases, or infrastructure
+technologies into the search query.
+
+Do not search for the developer's name.
+
+REPOSITORY SELECTION:
+
+After search_repositories returns results, select exactly ONE repository.
+
+The repository should satisfy as many of these requirements as possible:
+
+- At least 500 GitHub stars
+- At least 50 open issues
+- Owned by an organization or well-known open-source project
+- Real product, SaaS, self-hosted tool, or developer platform
+- Multiple contributors
+- Strong match with the developer's product-building identity
 
 Avoid:
 
@@ -86,13 +122,54 @@ Avoid:
 - starter templates
 - obvious mega-projects
 
-If no repository meets the criteria, return:
+IMPORTANT:
+
+Do NOT blindly select the first search result.
+
+Use the developer profile to determine which result has the strongest
+PRODUCT-DOMAIN fit.
+
+If none of the returned repositories clearly satisfies the requirements,
+return:
 
 {
   "repository": null
 }
 
-Return exactly:
+EVIDENCE RULES:
+
+Only use information contained in the search results.
+
+Never invent:
+
+- stars
+- issue counts
+- contributors
+- technologies
+- descriptions
+- URLs
+- ownership
+- repository names
+
+If a required repository property cannot be established from the tool
+result, do not fabricate it.
+
+FIT SCORE:
+
+fitScore must be an integer from 0 to 100.
+
+Base fitScore primarily on:
+
+- product-domain similarity
+- similarity to the developer's engineering patterns
+- similarity to contribution areas
+- similarity to the developer's builder archetype
+
+Do not inflate the score merely because the repository is popular.
+
+OUTPUT:
+
+Return exactly this structure:
 
 {
   "repository": {
@@ -108,56 +185,76 @@ Return exactly:
   }
 }
 
+OR:
+
+{
+  "repository": null
+}
+
 FINAL RULES:
 
-- Return exactly one repository or repository: null.
+- Exactly one repository OR null.
 - Never return alternatives.
-- Never invent repository information.
+- Never add extra fields.
+- Never invent information.
 - fitScore must be an integer from 0 to 100.
 - difficulty must always be "intermediate".
-- Never add extra fields.
-- Never output markdown.
-- Never ask questions.
 - Return valid JSON only.
+- No markdown.
+- No explanation.
+- No questions.
+- Stop immediately after the final }.
 `,
 
-      mcpServers: [
-        {
-          name: "github",
-          enableTools: ["search_repositories"],
-          preload: true,
-          preloadTools: ["search_repositories"],
+        mcpServers: [
+          {
+            name: "github",
+
+            enableTools: ["search_repositories"],
+
+            preload: true,
+
+            preloadTools: ["search_repositories"],
+          },
+        ],
+
+        config: {
+          askUserQuestions: {
+            enabled: false,
+          },
+
+          dynamicSubAgents: {
+            enabled: false,
+          },
+
+          generativeUi: {
+            enabled: false,
+          },
+
+          // One tool call + final response.
+          iterationLimit: 3,
+
+          sandbox: {
+            enabled: false,
+          },
         },
-      ],
 
-      config: {
-        askUserQuestions: {
-          enabled: false,
-        },
-
-        dynamicSubAgents: {
-          enabled: false,
-        },
-
-        generativeUi: {
-          enabled: false,
-        },
-
-        iterationLimit: 7,
-
-        sandbox: {
-          enabled: false,
+        // IMPORTANT:
+        // Cerebras GPT-OSS does not accept tools together with
+        // response_format: json_object in this configuration.
+        // The prompt enforces JSON instead.
+        responseFormat: {
+          type: "text",
         },
       },
+    });
 
-      responseFormat: {
-        type: "json_object",
-      },
-    },
-  });
-
-  console.log("Agent created successfully:");
-  console.log(agent);
+    console.log("OSS Discover Agent created successfully!");
+    console.log(agent);
+  } catch (error) {
+    console.error("Failed to create OSS Discover Agent:");
+    console.error(error);
+  }
 }
 
 createAgent().catch(console.error);
