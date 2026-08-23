@@ -37,7 +37,11 @@ function IssuesPanel({ repoFullName }: IssuesPanelProps) {
 
       <div className="flex flex-col gap-2 mt-3">
         {issues.map((issue) => (
-          <IssueCard key={issue.number} issue={issue} />
+          <IssueCard
+            key={issue.number}
+            issue={issue}
+            repoFullName={repoFullName}
+          />
         ))}
       </div>
     </div>
