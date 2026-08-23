@@ -1,7 +1,7 @@
 import { TrueForge } from "@truefoundry/trueforge-sdk";
 
 const client = new TrueForge({
-  baseUrl: "http://localhost:8790",
+  baseUrl: "http://localhost:8791",
 });
 
 async function createAgent() {
