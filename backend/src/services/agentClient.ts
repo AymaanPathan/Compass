@@ -8,3 +8,4 @@ export const agentClient = new TrueForge({
 export const OSS_AGENT_NAME = "oss-discover-agent";
 export const DEV_PROFILE_AGENT_NAME = "developer-profile-agent";
 export const OSS_ISSUES_AGENT_NAME = "oss-issue-fetcher";
+export const OSS_ISSUE_DEEP_DIVE_AGENT_NAME = "oss-issue-deep-dive";

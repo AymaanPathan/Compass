@@ -6,15 +6,14 @@ import investigationReducer from "./investigationSlice";
 import fileContentReducer from "./fileContentSlice";
 import devProfileReducer from "./devProfileSlice";
 
-
 export const store = configureStore({
   reducer: {
     auth: authReducer,
     oss: ossReducer,
     issues: issuesReducer,
-    investigation: investigationReducer,
     fileContent: fileContentReducer,
     devProfile: devProfileReducer,
+    investigation: investigationReducer,
   },
 });
 

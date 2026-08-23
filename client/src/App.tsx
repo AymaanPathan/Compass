@@ -7,6 +7,7 @@ import Landing from "./pages/Landing";
 import Analysis from "./pages/Analysis";
 import RepoDetailPage from "./pages/RepoDetailPage";
 import AgentPage from "./pages/AgentPage";
+import IssueDetailPage from "./pages/IssueDetailPage";
 
 function App() {
   const dispatch = useDispatch<AppDispatch>();
@@ -21,6 +22,10 @@ function App() {
       <Route path="/analysis" element={<Analysis />} />
       <Route path="/agent" element={<AgentPage />} />
       <Route path="/repo/:owner/:repo" element={<RepoDetailPage />} />
+      <Route
+        path="/repo/:owner/:repo/issue/:issueNumber"
+        element={<IssueDetailPage />}
+      />
     </Routes>
   );
 }

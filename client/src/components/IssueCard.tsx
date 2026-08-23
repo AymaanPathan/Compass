@@ -1,11 +1,15 @@
+import { Link } from "react-router-dom";
 import type { GithubIssue } from "../store/issuesSlice";
 
-function IssueCard({ issue }: { issue: GithubIssue }) {
+interface IssueCardProps {
+  issue: GithubIssue;
+  repoFullName: string;
+}
+
+function IssueCard({ issue, repoFullName }: IssueCardProps) {
   return (
-    <a
-      href={issue.url}
-      target="_blank"
-      rel="noopener noreferrer"
+    <Link
+      to={`/repo/${repoFullName}/issue/${issue.number}`}
       className="group flex flex-col gap-1.5 rounded-xl border border-neutral-800 bg-neutral-900 p-4 transition-colors hover:border-neutral-700 hover:bg-neutral-900/70"
     >
       <div className="flex items-start justify-between gap-3">
@@ -32,12 +36,26 @@ function IssueCard({ issue }: { issue: GithubIssue }) {
         </div>
       )}
 
-      <p className="text-[11px] text-neutral-600">
-        opened by {issue.author}
-        {issue.createdAt &&
-          ` · ${new Date(issue.createdAt).toLocaleDateString()}`}
-      </p>
-    </a>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] text-neutral-600">
+          opened by {issue.author}
+          {issue.createdAt &&
+            ` · ${new Date(issue.createdAt).toLocaleDateString()}`}
+        </p>
+
+        <a
+          href={issue.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          // Nested inside a <Link>, so stop the click from also
+          // triggering navigation to the deep-dive page.
+          onClick={(e) => e.stopPropagation()}
+          className="shrink-0 text-[11px] text-neutral-600 hover:text-neutral-300 transition-colors"
+        >
+          GitHub ↗
+        </a>
+      </div>
+    </Link>
   );
 }
 
