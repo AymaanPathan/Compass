@@ -10,7 +10,7 @@ async function createAgent() {
 
     manifest: {
       model: {
-        name: "gemma-4-31b/gemma-4-31b",
+        name: "gpt-oss-120b/gpt-oss-120b",
         params: {
           max_tokens: 2000,
           temperature: 0.3,
