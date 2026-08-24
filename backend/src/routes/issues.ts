@@ -3,6 +3,7 @@ import {
   agentClient,
   OSS_ISSUES_AGENT_NAME,
   OSS_ISSUE_DEEP_DIVE_AGENT_NAME,
+  OSS_CODE_EXPLORER_AGENT_NAME,
 } from "../services/agentClient";
 import { withAgentRetry } from "../utils/retryAgentTurn";
 
@@ -40,17 +41,42 @@ export interface IssueDeepDiveResult {
   backgroundContext: string;
 }
 
+export interface CodeExplorerResult {
+  repository: string;
+  issueNumber: number;
+  relevantPackage: string;
+  relevantSubsystem: string;
+  relevantFiles: string[];
+  relevantFunctionsOrClasses: string[];
+  codeFlow: string;
+  relevantTests: string[];
+  architectureContext: string;
+  dependenciesAndInterfaces: string[];
+  externalContext: string;
+}
+
+// Optional hand-off context from Agent 1 (deep dive) into Agent 2 (code
+// explorer), so the code explorer can aim its searches instead of
+// re-guessing from the raw issue. All fields optional — the code explorer
+// works fine without this, it just searches less precisely.
+export interface DeepDiveContext {
+  whatIsTheIssue?: string;
+  whatIsHappeningNow?: string;
+  whereInTheProject?: string;
+  technicalConcepts?: string[];
+}
+
 // ---------------------------------------------------------------------------
-// In-flight de-dupe + short-lived success cache (repo-level issue lists).
+// In-flight de-dupe + short-lived success caches.
 //
 // Two problems this solves:
 // 1. React StrictMode (and any accidental double-mount/double-click on the
-//    frontend) can fire two requests for the same repo within milliseconds.
+//    frontend) can fire two requests for the same key within milliseconds.
 //    Without de-duping, that's two full agent sessions hitting the LLM
 //    provider's per-minute rate limit at once — exactly what caused the
 //    429s in the logs.
-// 2. Repeatedly opening the same repo's detail page shouldn't re-run the
-//    agent every time. A short TTL cache means a second visit within a few
+// 2. Repeatedly opening the same repo/issue shouldn't re-run the agent
+//    every time. A short TTL cache means a second visit within a few
 //    minutes is instant and costs zero agent calls.
 // ---------------------------------------------------------------------------
 
@@ -81,12 +107,6 @@ function setCached(repoFullName: string, result: IssuesResult) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// In-flight de-dupe + short-lived success cache (single-issue deep dives).
-// Same pattern as above, keyed at the issue level instead of the repo
-// level, since a deep dive is scoped to one specific issue.
-// ---------------------------------------------------------------------------
-
 const DEEPDIVE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 const deepDiveInFlight = new Map<string, Promise<IssueDeepDiveResult>>();
@@ -115,6 +135,41 @@ function setCachedDeepDive(key: string, result: IssueDeepDiveResult) {
   deepDiveCache.set(key, {
     result,
     expiresAt: Date.now() + DEEPDIVE_CACHE_TTL_MS,
+  });
+}
+
+const CODE_EXPLORER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+const codeExplorerInFlight = new Map<string, Promise<CodeExplorerResult>>();
+const codeExplorerCache = new Map<
+  string,
+  { result: CodeExplorerResult; expiresAt: number }
+>();
+
+// Cache/in-flight key intentionally does NOT include the deep-dive context.
+// The context is a search hint, not a different question — a cached result
+// keyed only by issue is fine to reuse whether or not context was passed
+// (whoever asks first primes the cache for whoever asks next).
+function codeExplorerKey(repoFullName: string, issueNumber: number): string {
+  return `${repoFullName}#${issueNumber}`;
+}
+
+function getCachedCodeExplorer(key: string): CodeExplorerResult | null {
+  const entry = codeExplorerCache.get(key);
+  if (!entry) return null;
+
+  if (Date.now() > entry.expiresAt) {
+    codeExplorerCache.delete(key);
+    return null;
+  }
+
+  return entry.result;
+}
+
+function setCachedCodeExplorer(key: string, result: CodeExplorerResult) {
+  codeExplorerCache.set(key, {
+    result,
+    expiresAt: Date.now() + CODE_EXPLORER_CACHE_TTL_MS,
   });
 }
 
@@ -270,15 +325,66 @@ function parseDeepDiveResponse(text: string): IssueDeepDiveResult | null {
   }
 }
 
+function parseCodeExplorerResponse(text: string): CodeExplorerResult | null {
+  try {
+    const cleaned = stripMarkdownFences(text);
+    const jsonStr = extractBalancedJson(cleaned);
+
+    if (!jsonStr) {
+      console.error(
+        "[issues/code-explore] no balanced JSON object found (output may be truncated)",
+      );
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonStr);
+
+    if (!parsed.repository) {
+      console.error("[issues/code-explore] response missing repository field");
+      return null;
+    }
+
+    const strArr = (val: any): string[] =>
+      Array.isArray(val) ? val.map(String) : [];
+
+    return {
+      repository: String(parsed.repository || ""),
+      issueNumber: Number(parsed.issueNumber) || 0,
+      relevantPackage: String(parsed.relevantPackage || ""),
+      relevantSubsystem: String(parsed.relevantSubsystem || ""),
+      relevantFiles: strArr(parsed.relevantFiles),
+      relevantFunctionsOrClasses: strArr(parsed.relevantFunctionsOrClasses),
+      codeFlow: String(parsed.codeFlow || ""),
+      relevantTests: strArr(parsed.relevantTests),
+      architectureContext: String(parsed.architectureContext || ""),
+      dependenciesAndInterfaces: strArr(parsed.dependenciesAndInterfaces),
+      externalContext: String(parsed.externalContext || ""),
+    };
+  } catch (error) {
+    console.error("[issues/code-explore] failed to parse agent output:", error);
+    console.error("[issues/code-explore] raw output:", text);
+    return null;
+  }
+}
+
 function isRateLimitError(error: any): boolean {
   return String(error?.message || error || "").includes("429");
 }
 
-async function runIssuesAgent(prompt: string): Promise<string> {
+async function runAgent(
+  agentName: string,
+  prompt: string,
+  debugLabel: string,
+  retryOptions?: {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+  },
+): Promise<string> {
   return withAgentRetry(
     async () => {
       const { data: session } = await agentClient.sessions.create({
-        agent: { name: OSS_ISSUES_AGENT_NAME },
+        agent: { name: agentName },
       });
 
       const stream = await agentClient.sessions.createTurnStream(session.id, {
@@ -290,7 +396,7 @@ async function runIssuesAgent(prompt: string): Promise<string> {
       for await (const { data: event } of stream.withMetadata()) {
         if (DEBUG_AGENT_EVENTS) {
           console.log(
-            `[issues agent event] ${event?.type}`,
+            `[${debugLabel} agent event] ${event?.type}`,
             JSON.stringify(event),
           );
         }
@@ -326,59 +432,10 @@ async function runIssuesAgent(prompt: string): Promise<string> {
     // logs) — burning through several fast retries inside one HTTP request
     // just wastes time and still fails. Fail fast instead; the in-flight
     // de-dupe + cache above do the real work of keeping request volume down.
-    { maxAttempts: 2, baseDelayMs: 1500 },
-  );
-}
-
-async function runDeepDiveAgent(prompt: string): Promise<string> {
-  return withAgentRetry(
-    async () => {
-      const { data: session } = await agentClient.sessions.create({
-        agent: { name: OSS_ISSUE_DEEP_DIVE_AGENT_NAME },
-      });
-
-      const stream = await agentClient.sessions.createTurnStream(session.id, {
-        input: [{ type: "user.message", content: prompt }],
-      });
-
-      let finalText = "";
-
-      for await (const { data: event } of stream.withMetadata()) {
-        if (DEBUG_AGENT_EVENTS) {
-          console.log(
-            `[deep-dive agent event] ${event?.type}`,
-            JSON.stringify(event),
-          );
-        }
-
-        if (event.type === "model.message.delta" && event.threadId === "main") {
-          finalText += event.content ?? "";
-        }
-
-        if (event.type === "turn.done") {
-          if (event.state?.status === "error") {
-            throw new Error(
-              (event.state as any)?.message || "Agent turn failed",
-            );
-          }
-
-          if (event.state?.status === "done" && event.state?.output?.content) {
-            const content = event.state.output.content;
-
-            finalText =
-              typeof content === "string"
-                ? content
-                : content
-                    .filter((item: any) => item.type === "text")
-                    .map((item: any) => item.text)
-                    .join("");
-          }
-        }
-      }
-
-      return finalText.trim();
-    },
-    { maxAttempts: 2, baseDelayMs: 1500 },
+    // Callers that make many tool calls per turn (code-explorer) should
+    // pass a longer baseDelayMs, since they're more likely to trip a
+    // per-minute ceiling mid-run rather than at the very first call.
+    retryOptions ?? { maxAttempts: 2, baseDelayMs: 1500 },
   );
 }
 
@@ -399,7 +456,7 @@ async function getIssuesForRepo(repoFullName: string): Promise<IssuesResult> {
     console.log("[issues/fetch] running agent for", repoFullName);
 
     const prompt = `Repository: ${repoFullName}`;
-    const finalText = await runIssuesAgent(prompt);
+    const finalText = await runAgent(OSS_ISSUES_AGENT_NAME, prompt, "issues");
     const parsed = parseIssuesResponse(finalText);
 
     if (!parsed) {
@@ -450,7 +507,11 @@ async function getDeepDiveForIssue(
     console.log("[issues/deep-dive] running agent for", key);
 
     const prompt = `${repoFullName}#${issueNumber}`;
-    const finalText = await runDeepDiveAgent(prompt);
+    const finalText = await runAgent(
+      OSS_ISSUE_DEEP_DIVE_AGENT_NAME,
+      prompt,
+      "deep-dive",
+    );
     const parsed = parseDeepDiveResponse(finalText);
 
     if (!parsed) {
@@ -471,6 +532,90 @@ async function getDeepDiveForIssue(
     return await promise;
   } finally {
     deepDiveInFlight.delete(key);
+  }
+}
+
+function buildCodeExplorerPrompt(
+  repoFullName: string,
+  issueNumber: number,
+  context?: DeepDiveContext,
+): string {
+  const base = `${repoFullName}#${issueNumber}`;
+
+  if (!context) return base;
+
+  // Only pass along the fields the agent's prompt says it uses, and only
+  // if at least one is actually present — an empty/near-empty context
+  // block is just noise for the model.
+  const trimmed: DeepDiveContext = {};
+  if (context.whatIsTheIssue) trimmed.whatIsTheIssue = context.whatIsTheIssue;
+  if (context.whatIsHappeningNow)
+    trimmed.whatIsHappeningNow = context.whatIsHappeningNow;
+  if (context.whereInTheProject)
+    trimmed.whereInTheProject = context.whereInTheProject;
+  if (context.technicalConcepts && context.technicalConcepts.length > 0)
+    trimmed.technicalConcepts = context.technicalConcepts;
+
+  if (Object.keys(trimmed).length === 0) return base;
+
+  return `${base}\n\nCONTEXT FROM AGENT 1:\n${JSON.stringify(trimmed)}`;
+}
+
+async function getCodeExplorationForIssue(
+  repoFullName: string,
+  issueNumber: number,
+  context?: DeepDiveContext,
+): Promise<CodeExplorerResult> {
+  const key = codeExplorerKey(repoFullName, issueNumber);
+
+  const cached = getCachedCodeExplorer(key);
+  if (cached) {
+    console.log(`[issues/code-explore] cache hit for ${key}`);
+    return cached;
+  }
+
+  const inFlight = codeExplorerInFlight.get(key);
+  if (inFlight) {
+    console.log(`[issues/code-explore] joining in-flight request for ${key}`);
+    return inFlight;
+  }
+
+  const promise = (async () => {
+    console.log("[issues/code-explore] running agent for", key);
+
+    const prompt = buildCodeExplorerPrompt(repoFullName, issueNumber, context);
+    const finalText = await runAgent(
+      OSS_CODE_EXPLORER_AGENT_NAME,
+      prompt,
+      "code-explore",
+      // This agent makes up to ~9 tool calls per turn (issue_read,
+      // read_wiki_structure, up to 2 search_code, up to 5
+      // get_file_contents), so it's far more likely to trip a
+      // per-minute provider rate limit mid-run than /fetch or
+      // /deep-dive. Give it a longer backoff — 15s/30s/60s — so a real
+      // per-minute 429 actually has a chance to clear before we give up.
+      { maxAttempts: 3, baseDelayMs: 15000, maxDelayMs: 60000 },
+    );
+    const parsed = parseCodeExplorerResponse(finalText);
+
+    if (!parsed) {
+      const err: any = new Error(
+        "Code explorer agent returned an invalid response",
+      );
+      err.raw = finalText;
+      throw err;
+    }
+
+    setCachedCodeExplorer(key, parsed);
+    return parsed;
+  })();
+
+  codeExplorerInFlight.set(key, promise);
+
+  try {
+    return await promise;
+  } finally {
+    codeExplorerInFlight.delete(key);
   }
 }
 
@@ -550,6 +695,77 @@ router.post("/deep-dive", async (req: Request, res: Response) => {
     return res.status(502).json({
       success: false,
       error: error.message || "Failed to run deep dive",
+      raw: error.raw,
+    });
+  }
+});
+
+router.post("/code-explore", async (req: Request, res: Response) => {
+  try {
+    const { repoFullName, issueNumber, context } = req.body;
+
+    if (!repoFullName || issueNumber === undefined || issueNumber === null) {
+      return res.status(400).json({
+        success: false,
+        error: "repoFullName and issueNumber are required",
+      });
+    }
+
+    const parsedIssueNumber = Number(issueNumber);
+    if (!Number.isFinite(parsedIssueNumber)) {
+      return res.status(400).json({
+        success: false,
+        error: "issueNumber must be a number",
+      });
+    }
+
+    // context is optional and untrusted client input — only forward the
+    // specific string/string[] fields the agent prompt expects, nothing else.
+    let safeContext: DeepDiveContext | undefined;
+    if (context && typeof context === "object") {
+      safeContext = {
+        whatIsTheIssue:
+          typeof context.whatIsTheIssue === "string"
+            ? context.whatIsTheIssue
+            : undefined,
+        whatIsHappeningNow:
+          typeof context.whatIsHappeningNow === "string"
+            ? context.whatIsHappeningNow
+            : undefined,
+        whereInTheProject:
+          typeof context.whereInTheProject === "string"
+            ? context.whereInTheProject
+            : undefined,
+        technicalConcepts: Array.isArray(context.technicalConcepts)
+          ? context.technicalConcepts.filter((c: any) => typeof c === "string")
+          : undefined,
+      };
+    }
+
+    const result = await getCodeExplorationForIssue(
+      repoFullName,
+      parsedIssueNumber,
+      safeContext,
+    );
+
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error: any) {
+    console.error("[issues/code-explore] error:", error);
+
+    if (isRateLimitError(error)) {
+      return res.status(429).json({
+        success: false,
+        error:
+          "The code explorer agent is rate-limited right now. Please wait about a minute and try again.",
+      });
+    }
+
+    return res.status(502).json({
+      success: false,
+      error: error.message || "Failed to explore code",
       raw: error.raw,
     });
   }

@@ -5,155 +5,241 @@ const client = new TrueForge({
 });
 
 /**
- * oss-issue-code-explorer (Agent 2)
+ * OSS Issue Code Finder — Agent 2 (RPM-optimized, revised)
  *
- * Purpose: "Show me where this issue lives in the codebase and help me
- * understand the relevant code." Nothing more.
+ * Purpose:
+ * Find the files relevant to a GitHub issue and suggest a few possible
+ * approaches to solve it. Nothing more.
  *
- * This agent is a MAP, not a SOLVER:
- *   - It locates and explains relevant files, functions, tests, and flow.
- *   - It does NOT diagnose root cause, propose fixes, write code, modify
- *     code, run tests, or decide a solution.
+ * WHY THIS VERSION IS DIFFERENT FROM THE PRIOR ONE:
+ * The Cerebras free tier caps this agent's model at 5 requests/minute. Each
+ * tool call is a separate LLM turn = a separate request. The prior version
+ * capped the worst case at 6 turns (issue_read(1) + search_code(2) +
+ * get_file_contents(2) + final(1)) — which sits AT or ABOVE the 5rpm
+ * ceiling, and a real run hit exactly that worst case and got a 429.
  *
- * Same reliability pattern as Agent 1 (oss-issue-deep-dive):
- *   - responseFormat: "text", not "json_object"
- *   - every tool called a small, fixed number of times — no open-ended loops
- *   - flat output: arrays of plain strings, no nested objects
- *   - no compaction, no context-management extras
+ * This version:
+ * - Reads the issue (and its triage/comment thread, if the tool supports
+ *   it — auto-triage bots often already name the exact file + root cause,
+ *   which can skip search entirely)
+ * - Searches for relevant source code with EXACTLY ONE call, using a real
+ *   keyword (not a bare path: filter, which reliably returns 0 results
+ *   and burns a call for nothing)
+ * - Uses search_code's own text_matches fragments as primary evidence
+ *   instead of defaulting to a full file fetch
+ * - Only escalates to get_file_contents (at most ONCE) if the fragment
+ *   truly isn't enough
+ * - Reports relevant files + a few possible approaches to fix it
+ *
+ * New worst case: issue_read(1) + search_code(1) + get_file_contents(1) +
+ * final JSON turn(1) = 4 LLM turns. iterationLimit is set to 5, one turn
+ * of margin above that true worst case — matching the safety margin that
+ * makes the sibling developer-profile-agent reliable on the same rate
+ * limit.
+ *
+ * It does NOT:
+ * - Diagnose the root cause in depth
+ * - Write code
+ * - Modify code
+ * - Run tests
+ * - Create PRs
+ * - Produce a full architecture map (no subsystem chains, no dependency
+ *   graphs, no test inventories — see prior version if that's needed again)
  */
+
 async function createAgent() {
   const { data: agent } = await client.agents.create({
     name: "oss-issue-code-explorer",
 
     manifest: {
       model: {
-        name: "gpt-oss-120b/gpt-oss-120b",
+        name: "gemma-4-31b/gemma-4-31b",
         params: {
-          max_tokens: 2600,
-          frequency_penalty: 0.4,
-          presence_penalty: 0.2,
+          max_tokens: 4096,
+          frequency_penalty: 0.2,
+          presence_penalty: 0.1,
         },
       },
 
       instructions: `
-You are OSS Issue Code Explorer. Your only job is to help a developer find
-and understand the code relevant to a GitHub issue — where it lives, what
-it does, and how it flows. You are a MAP, not a SOLVER.
+You are OSS Issue Code Finder.
 
-INPUT: "owner/repo#issue_number", optionally followed by prior context from
-Agent 1 (the issue-understanding agent), formatted like:
+Your job has exactly two parts:
+1. Find the files relevant to this GitHub issue.
+2. Suggest a few possible approaches to solve it.
+
+You are NOT writing code, NOT creating a PR, and NOT picking a single
+"correct" fix. You're giving a developer a starting point: where to look
+and a few directions they could take.
+
+INPUT FORMAT:
 
 owner/repo#issue_number
 
+Optionally followed by:
+
 CONTEXT FROM AGENT 1:
-{ "whatIsTheIssue": "...", "whatIsHappeningNow": "...", "whereInTheProject": "...", "technicalConcepts": [...] }
+{
+  "whatIsTheIssue": "...",
+  "whatIsHappeningNow": "...",
+  "whereInTheProject": "...",
+  "technicalConcepts": [...]
+}
 
-If this context block is present, use it to work SMARTER, not to skip work:
-- Use "whatIsHappeningNow" and "technicalConcepts" to pick better, more
-  specific search_code query terms than you'd guess from the raw issue
-  alone (e.g. if it mentions "dimension probe," search for that concept's
-  likely code terms — probe, dimension, embed — rather than generic words).
-- Use "whereInTheProject" as a strong starting hint for which package/
-  subsystem to expect, so your wiki lookup and file search converge faster.
-- Still perform every tool call in the sequence below. The Agent 1 context
-  is a hint to aim your searches well, not a replacement for verifying
-  against the actual code and wiki. Agent 1 deliberately does not name
-  exact files or functions, so you still need issue_read and search_code
-  to find the real, concrete answers — the context just helps you find
-  them faster and more accurately.
-- If no CONTEXT FROM AGENT 1 block is present, proceed exactly as normal
-  using only the issue itself.
+If Agent 1 context exists, use it to make your search more specific.
+Agent 1 context is only a hint — verify findings against the repository.
 
-Do these tool calls, in this order, respecting the call limits below:
+RATE BUDGET — HARD CONSTRAINT:
+The model provider allows very few requests per minute. Every tool call you
+make is a separate request. Stay within the call budget below. Treat these
+as hard caps, not targets — always prefer the fewer call path.
 
-1. issue_read with method="get" — exactly once. Get the issue title and
-   body so you know what functionality to look for.
-2. read_wiki_structure (deepwiki) — exactly once. Get the repo's
-   architecture map to identify the relevant package and subsystem.
-3. search_code — up to 2 times. First call: search for source code related
-   to the issue's subject (use specific terms from the issue title/body,
-   e.g. function or concept names actually mentioned). Second call
-   (optional, only if useful): search for existing tests covering that
-   same functionality (e.g. add "test" to the query or search a test
-   directory pattern).
-4. get_file_contents — up to 5 times. Read the actual content of the most
-   relevant files found via search_code, so you can describe what each
-   file does and identify relevant functions/classes and the code flow
-   between them.
-5. tavily_search — at most 1 time, and ONLY if you encounter an interface,
-   pattern, or concept that the repo's own context doesn't explain well
-   enough to describe accurately. Skip this call entirely if not needed.
+TOOL EXECUTION PLAN — FOLLOW THIS EXACT ORDER, DO NOT SKIP STEPS:
 
-Then immediately return the result. Do not exceed any call limit above.
-Do not call any other tools.
+1. issue_read
+   - Call exactly ONCE, FIRST.
+   - Use method="get".
+   - If a comments-inclusive method or a separate comments tool is
+     available and enabled, prefer getting the comment thread too. Auto-
+     triage bots and maintainers often post the exact file(s), root cause,
+     and even a linked fix PR directly in the comments — if that evidence
+     is already present and specific, it IS your answer. Skip straight to
+     OUTPUT and do NOT call search_code or get_file_contents at all.
 
-Return valid JSON only. No markdown, no explanation, no thinking out loud.
-Stop immediately after the final }.
+2. search_code
+   - Only reached if step 1 did not already give you a named file plus
+     enough context to describe the bug and approaches.
+   - Call EXACTLY ONCE. No retries under any circumstance, even if the
+     first query returns nothing usable — report what you found instead.
+   - Query construction rule: build the query around a literal, distinctive
+     SYMBOL or STRING pulled from the issue (a function/class/variable
+     name, a unique error message fragment, an identifier quoted in a code
+     block). NEVER submit a query built only from a path: filter with no
+     search keyword — GitHub's code search requires an actual keyword, and
+     a path-only query reliably returns zero results, wasting the call.
+   - Treat the returned text_matches[].fragment content as your primary
+     evidence. In most cases this fragment already shows the relevant
+     function or logic and is enough to identify the file and describe
+     approaches without reading the full file.
+   - Do NOT use tavily_search or read_wiki_structure — repository context
+     from issue_read and search_code should be sufficient.
 
-SCOPE BOUNDARY — this is important:
+3. get_file_contents
+   - Treat this as a LAST-RESORT escalation, not a default step.
+   - Call it ONLY if the search_code fragment is clearly insufficient —
+     e.g. it's truncated mid-logic, cuts off before the relevant branch or
+     condition, or doesn't actually show the code path the issue describes.
+   - AT MOST ONE call, on the single most relevant file identified via
+     search_code.
+   - If the fragment was already sufficient, skip this step entirely.
 
-Do NOT:
-- diagnose the root cause of the bug
-- propose a fix or code change
-- write or modify any code
-- decide a final solution
-- create a PR
-- run tests
-- tell the developer "change X to Y"
-- go deeper than identifying and describing relevant functions/classes —
-  do not explain WHY they cause the bug, only WHAT they do and how they
-  relate to the issue's subject matter
+4. tavily_search / read_wiki_structure
+   - DO NOT USE. Repository context should be sufficient for this agent.
 
-You MAY:
-- identify the package, subsystem, files, functions/classes, tests, and
-  code flow relevant to the issue
-- describe what each piece does in plain terms
-- describe how the pieces interact at a high level
+IMPORTANT TOOL DISCIPLINE:
 
-Use exactly this shape. Every array item must be a plain string (never a
-nested object) — fold any sub-detail (like a file's purpose) into that same
-string as plain text:
+- Follow the steps above IN ORDER. Do not reorder or skip a step.
+- Never repeat a successful tool call.
+- Never call a tool just to "double check" something already established.
+- Stop using tools as soon as you have enough to answer — even if that
+  means using fewer calls than your budget allows.
+- Do not invent files, functions, or approaches not grounded in what you
+  actually found.
+- Do not perform exploratory loops.
+- If unsure whether another call is worth it, err on the side of NOT
+  calling — a slightly less complete answer beats exceeding the rate
+  budget and returning nothing.
+
+After the required investigation is complete, immediately produce the final JSON.
+
+OUTPUT:
+
+Return valid JSON only.
+
+Do not return markdown.
+Do not return explanations outside JSON.
+Do not return thinking.
+Do not wrap JSON in code fences.
+
+Use exactly this structure:
 
 {
   "repository": "owner/repo",
   "issueNumber": 0,
-  "relevantPackage": "string — which package/directory owns this functionality",
-  "relevantSubsystem": "string — the module chain, e.g. 'Memory → Semantic Recall → Vector Storage → Embedders'",
-  "relevantFiles": ["string, e.g. 'packages/core/src/memory/memory.ts — handles semantic memory operations'"],
-  "relevantFunctionsOrClasses": ["string, e.g. 'getEmbeddingDimension() — determines the embedder's output vector dimension'"],
-  "codeFlow": "string — high-level flow using arrows, e.g. 'Memory → determine embedding dimension → generate vector index name → store/search vectors'",
-  "relevantTests": ["string, e.g. 'packages/core/src/memory/memory.test.ts — covers embedding dimension logic' — empty array if none found"],
-  "architectureContext": "string — how these files/modules fit into the larger project",
-  "dependenciesAndInterfaces": ["string, e.g. 'Embedder interface — contract implemented by all embedding providers'"],
-  "externalContext": "string — only if genuinely necessary to understand the architecture; empty string otherwise"
+  "relevantFiles": [
+    "string"
+  ],
+  "approaches": [
+    "string"
+  ],
+  "summary": "string"
 }
 
-Rules:
-- relevantFunctionsOrClasses: identify them, do not explain the bug through
-  them — just what each one does.
-- codeFlow: one short arrow-chain string, not a paragraph.
-- If a category has nothing relevant, use an empty array or empty string —
-  do not invent files, functions, or tests that were not actually found.
+FIELD RULES:
+
+repository:
+- Repository in owner/repo format.
+
+issueNumber:
+- Numeric GitHub issue number.
+
+relevantFiles:
+- Plain strings only.
+- Only include files actually found via search_code / get_file_contents /
+  a comment thread that named them explicitly.
+- Include file path and a short reason it's relevant.
+
+Example:
+"packages/core/src/memory/memory.ts — handles semantic memory operations, likely where the dimension mismatch originates"
+
+approaches:
+- 2-4 short, distinct possible ways to solve the issue.
+- High-level direction only — describe the idea, do NOT write code or a diff.
+- Each approach should be a single sentence.
+
+Example:
+"Add a null check before accessing embedder.dimension in getEmbeddingDimension() so it falls back to a default instead of throwing"
+
+summary:
+- 1-2 plain-language sentences: what the issue is and roughly where it lives.
+- No jargon dump, no restating the full issue body.
+
+SCOPE BOUNDARY:
+
+You MAY:
+- identify relevant files
+- briefly explain why each file is relevant
+- describe 2-4 possible approaches at a high level
+
+You MUST NOT:
+- write replacement code or diffs
+- modify code
+- run tests
+- create a PR
+- pick and commit to a single "correct" fix
+- produce a deep architecture / dependency / test map
+
+STOP after returning the JSON.
 `,
 
       mcpServers: [
         {
           name: "github",
           enableTools: ["issue_read", "search_code", "get_file_contents"],
+          // preload=true + explicit preloadTools avoids per-call tool
+          // discovery ("Listing tools" + "get_tool_info" round-trips).
+          // Without this, every call_tool is preceded by two extra
+          // provider requests, which is what was burning through the
+          // per-minute rate limit and causing 429s after only a few
+          // real tool calls.
+          //
+          // If your GitHub MCP server exposes a separate comments tool
+          // (e.g. "issue_comments" / "list_issue_comments"), add it here
+          // and to preloadTools below — reading the comment thread can
+          // let step 1 short-circuit steps 2-3 entirely on repos that run
+          // auto-triage bots.
           preload: true,
           preloadTools: ["issue_read", "search_code", "get_file_contents"],
-        },
-        {
-          name: "deepwiki",
-          enableTools: ["read_wiki_structure"],
-          preload: true,
-          preloadTools: ["read_wiki_structure"],
-        },
-        {
-          name: "tavily",
-          enableTools: ["tavily_search"],
-          preload: true,
-          preloadTools: ["tavily_search"],
         },
       ],
 
@@ -161,13 +247,25 @@ Rules:
         askUserQuestions: {
           enabled: false,
         },
+
         dynamicSubAgents: {
           enabled: false,
         },
+
         generativeUi: {
           enabled: false,
         },
-        iterationLimit: 12,
+
+        // New worst case: issue_read(1) + search_code(1) +
+        // get_file_contents(1) + final JSON turn(1) = 4. iterationLimit is
+        // set to 5 — one turn of margin above the true worst case, the
+        // same safety margin that keeps the sibling
+        // developer-profile-agent (iterationLimit: 5, real max 4 turns)
+        // from ever hitting 429s. This is a hard stop enforced by the
+        // runtime — it does not rely on the model obeying the "exactly
+        // once" instructions above.
+        iterationLimit: 5,
+
         sandbox: {
           enabled: false,
         },
@@ -184,29 +282,23 @@ Rules:
 }
 
 /**
- * ── Response parsing ────────────────────────────────────────────────────
- * Same defensive pattern as Agent 1: extract the first complete, balanced
- * JSON object and ignore anything after it; fall back to regex field
- * extraction if the object never closes cleanly.
+ * Response parsing
  */
 
-export interface CodeExplorerResult {
+export interface CodeFinderResult {
   repository: string;
   issueNumber: number;
-  relevantPackage: string;
-  relevantSubsystem: string;
   relevantFiles: string[];
-  relevantFunctionsOrClasses: string[];
-  codeFlow: string;
-  relevantTests: string[];
-  architectureContext: string;
-  dependenciesAndInterfaces: string[];
-  externalContext: string;
+  approaches: string[];
+  summary: string;
 }
 
 function extractFirstJsonObject(raw: string): string | null {
   const start = raw.indexOf("{");
-  if (start === -1) return null;
+
+  if (start === -1) {
+    return null;
+  }
 
   let depth = 0;
   let inString = false;
@@ -223,6 +315,7 @@ function extractFirstJsonObject(raw: string): string | null {
       } else if (char === '"') {
         inString = false;
       }
+
       continue;
     }
 
@@ -235,6 +328,7 @@ function extractFirstJsonObject(raw: string): string | null {
       depth++;
     } else if (char === "}") {
       depth--;
+
       if (depth === 0) {
         return raw.slice(start, i + 1);
       }
@@ -244,79 +338,82 @@ function extractFirstJsonObject(raw: string): string | null {
   return null;
 }
 
-function extractPartialFields(raw: string): CodeExplorerResult | null {
+function extractPartialFields(raw: string): CodeFinderResult | null {
   const str = (key: string): string => {
     const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+
     return m ? m[1] : "";
   };
 
   const num = (key: string): number => {
     const m = raw.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`));
+
     return m ? parseInt(m[1], 10) : 0;
   };
 
   const arr = (key: string): string[] => {
     const m = raw.match(new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)\\]`));
-    if (!m) return [];
+
+    if (!m) {
+      return [];
+    }
+
     const items = m[1].match(/"((?:[^"\\]|\\.)*)"/g) ?? [];
+
     return items
       .map((s) => s.slice(1, -1))
       .filter((s) => s.length > 0 && !/^[\s,+:()]*$/.test(s));
   };
 
   const repository = str("repository");
-  if (!repository) return null;
+
+  if (!repository) {
+    return null;
+  }
 
   return {
     repository,
     issueNumber: num("issueNumber"),
-    relevantPackage: str("relevantPackage"),
-    relevantSubsystem: str("relevantSubsystem"),
     relevantFiles: arr("relevantFiles"),
-    relevantFunctionsOrClasses: arr("relevantFunctionsOrClasses"),
-    codeFlow: str("codeFlow"),
-    relevantTests: arr("relevantTests"),
-    architectureContext: str("architectureContext"),
-    dependenciesAndInterfaces: arr("dependenciesAndInterfaces"),
-    externalContext: str("externalContext"),
+    approaches: arr("approaches"),
+    summary: str("summary"),
   };
 }
 
-export function parseCodeExplorerResponse(
-  raw: string,
-): CodeExplorerResult | null {
+export function parseCodeFinderResponse(raw: string): CodeFinderResult | null {
   const candidate = extractFirstJsonObject(raw);
+
   if (candidate) {
     try {
-      return JSON.parse(candidate) as CodeExplorerResult;
+      return JSON.parse(candidate) as CodeFinderResult;
     } catch {
-      // fall through
+      // Fall through to partial extraction.
     }
   }
+
   return extractPartialFields(raw);
 }
 
 /**
- * withAgentRetry
+ * Retry helper for callers that execute agent turns.
  *
- * Wraps a call to this (or any) agent with exponential backoff on 429s.
- * The provider serving gemma-4-31b appears to have a fairly tight
- * requests-per-minute ceiling, and if multiple agents share the same
- * underlying key/quota, rapid back-to-back calls (e.g. Agent 1 → Agent 2
- * in the same pipeline, or running tests quickly) can trip it even when
- * each individual agent's tool-call budget looks reasonable.
- *
- * Usage:
- *   const result = await withAgentRetry(() =>
- *     client.sessions.createTurn(sessionId, { message: input })
- *   );
+ * Widened to fit a 5 req/min ceiling: on 429, wait a full minute (plus
+ * jitter) rather than a shorter backoff, since the limit resets on a
+ * rolling ~60s window. This does NOT reduce how many requests the agent
+ * makes — it only stops a single transient 429 from failing the whole run.
+ * The real fix is the call-budget reduction (iterationLimit + tightened
+ * tool-execution plan) above, which keeps the true worst case at 4 turns
+ * instead of 6.
  */
 export async function withAgentRetry<T>(
   fn: () => Promise<T>,
-  options: { maxRetries?: number; baseDelayMs?: number } = {},
+  options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+  } = {},
 ): Promise<T> {
-  const maxRetries = options.maxRetries ?? 4;
-  const baseDelayMs = options.baseDelayMs ?? 2000;
+  const maxRetries = options.maxRetries ?? 3;
+  const baseDelayMs = options.baseDelayMs ?? 65_000; // > 60s rolling window
 
   let lastError: unknown;
 
@@ -325,22 +422,26 @@ export async function withAgentRetry<T>(
       return await fn();
     } catch (err) {
       lastError = err;
+
+      const message = err instanceof Error ? err.message : String(err);
+
       const is429 =
-        err instanceof Error &&
-        (err.message.includes("429") ||
-          err.message.includes("Too Many Requests"));
+        message.includes("429") ||
+        message.includes("Too Many Requests") ||
+        message.includes("request_quota_exceeded");
 
       if (!is429 || attempt === maxRetries) {
         throw err;
       }
 
-      // Exponential backoff with jitter: 2s, 4s, 8s, 16s (+/- up to 500ms)
-      const delay = baseDelayMs * 2 ** attempt + Math.random() * 500;
+      const delay = baseDelayMs + Math.floor(Math.random() * 5_000);
+
       console.warn(
-        `429 from agent provider — retrying in ${Math.round(
-          delay,
-        )}ms (attempt ${attempt + 1}/${maxRetries})`,
+        `429 from model provider. Waiting ${Math.round(
+          delay / 1000,
+        )}s before retry ${attempt + 1}/${maxRetries}...`,
       );
+
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
