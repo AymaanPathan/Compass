@@ -22,7 +22,7 @@ const client = new TrueForge({
  */
 async function createAgent() {
   const { data: agent } = await client.agents.create({
-    name: "oss-issue-deep-dive",
+    name: "oss-understanding-agent",
 
     manifest: {
       model: {
