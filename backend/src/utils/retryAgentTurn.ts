@@ -28,24 +28,11 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Runs `fn` and retries it with exponential backoff (+ jitter) if it
- * throws an error that looks retryable (rate limits, timeouts, transient
- * connection errors, or an explicit agent-turn failure). Non-retryable
- * errors are rethrown immediately.
+ * Runs fn and retries it with exponential backoff (+ jitter) if it
+ * throws an error that looks retryable.
  *
- * NOTE: LLM provider rate limits are typically per-minute (a 429 here
- * commonly comes back with `retry-after: 50-60s`). Retrying a handful of
- * times with short backoffs inside a single HTTP request cannot outrun
- * that — it just guarantees repeated failure while the caller waits.
- * Keep `maxAttempts` low here; the real fix for rate-limit pressure is
- * reducing request volume upstream (de-duping concurrent requests,
- * caching recent results), not retrying harder.
- *
- * Callers whose agent makes many tool calls per turn (and so is more
- * likely to trip a per-minute ceiling mid-run, e.g. the code-explorer
- * agent) should pass a larger `baseDelayMs` explicitly rather than
- * relying on the default, which is sized for light callers like
- * issue discovery / deep dive.
+ * Keep maxAttempts low. Reducing request volume upstream is preferable
+ * to repeatedly retrying requests against rate limits.
  */
 export async function withAgentRetry<T>(
   fn: () => Promise<T>,
@@ -70,9 +57,10 @@ export async function withAgentRetry<T>(
 
       const rawBackoff = baseDelayMs * Math.pow(2, attempt - 1);
       const cappedBackoff = Math.min(rawBackoff, maxDelayMs);
-      // +/- up to 20% jitter so concurrent requests that failed together
-      // don't all retry on the same tick and re-trip the limit.
+
+      // +/- up to 20% jitter to avoid synchronized retries.
       const jitter = cappedBackoff * 0.2 * (Math.random() * 2 - 1);
+
       const backoffMs = Math.round(cappedBackoff + jitter);
 
       console.warn(
@@ -80,6 +68,7 @@ export async function withAgentRetry<T>(
           (error as Error)?.message
         }), retrying in ${backoffMs}ms`,
       );
+
       await delay(backoffMs);
     }
   }
